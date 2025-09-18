@@ -1,5 +1,5 @@
 """
-VRY - UI v2 (PyQt6 Version)
+VRY - UI v2.11
 Complete refactored version with performance optimizations
 Migrated to PyQt6 for improved WebEngine performance
 Fixed asyncio event loop issues for compiled executables
@@ -1248,7 +1248,7 @@ class VRYMainWindow(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("VRY - UI v2 (PyQt6)")
+        self.setWindowTitle("VRY - UI v2.11")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
         
