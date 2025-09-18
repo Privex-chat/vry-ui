@@ -2,6 +2,7 @@
 VRY - UI v2 (PyQt6 Version)
 Complete refactored version with performance optimizations
 Migrated to PyQt6 for improved WebEngine performance
+Fixed asyncio event loop issues for compiled executables
 """
 
 import asyncio
@@ -257,6 +258,7 @@ class VRYWorkerThread(QThread):
         self.game_state = None
         self.firstTime = True
         self.verbose_level = verbose_level
+        self.loop = None  # Store the event loop
         
     def initialize_vry(self):
         """Initialize VRY components"""
@@ -353,29 +355,41 @@ class VRYWorkerThread(QThread):
         """Main worker loop"""
         self.running = True
         
-        if not self.initialized:
-            self.initialize_vry()
-            
-        if not self.initialized:
-            self.error_signal.emit("Failed to initialize VRY")
-            return
+        # Set up the event loop for this thread
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         
-        while self.running:
-            try:
-                self.process_game_state()
-                for _ in range(20):
-                    if not self.running:
-                        break
-                    self.msleep(100)
-            except Exception as e:
-                if self.verbose_level > 0:
-                    self.error_signal.emit(f"Processing error: {str(e)}")
-                if self.verbose_level > 1:
-                    self.log(traceback.format_exc())
-                for _ in range(50):
-                    if not self.running:
-                        break
-                    self.msleep(100)
+        try:
+            if not self.initialized:
+                self.initialize_vry()
+                
+            if not self.initialized:
+                self.error_signal.emit("Failed to initialize VRY")
+                return
+            
+            while self.running:
+                try:
+                    self.process_game_state()
+                    for _ in range(20):
+                        if not self.running:
+                            break
+                        self.msleep(100)
+                except Exception as e:
+                    if self.verbose_level > 0:
+                        self.error_signal.emit(f"Processing error: {str(e)}")
+                    if self.verbose_level > 1:
+                        self.log(traceback.format_exc())
+                    for _ in range(50):
+                        if not self.running:
+                            break
+                        self.msleep(100)
+        finally:
+            # Clean up the event loop
+            if self.loop:
+                try:
+                    self.loop.close()
+                except Exception:
+                    pass
     
     def process_game_state(self):
         """Process current game state"""
@@ -397,16 +411,25 @@ class VRYWorkerThread(QThread):
                 self.log(f"first game state: {self.game_state}")
                 self.firstTime = False
             else:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                # Use the existing event loop instead of creating a new one
                 previous_game_state = self.game_state
-                self.game_state = loop.run_until_complete(
-                    self.Wss.recconect_to_websocket(self.game_state)
-                )
+                
+                # Run the async function in the existing event loop
+                if self.loop and not self.loop.is_closed():
+                    self.game_state = self.loop.run_until_complete(
+                        self.Wss.recconect_to_websocket(self.game_state)
+                    )
+                else:
+                    # If loop was closed somehow, create a new one
+                    self.loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self.loop)
+                    self.game_state = self.loop.run_until_complete(
+                        self.Wss.recconect_to_websocket(self.game_state)
+                    )
+                
                 if previous_game_state != self.game_state and self.game_state == "MENUS":
                     self.rank.invalidate_cached_responses()
                 self.log(f"new game state: {self.game_state}")
-                loop.close()
             
             presence = self.presences.get_presence()
             priv_presence = self.presences.get_private_presence(presence)
@@ -689,6 +712,19 @@ class VRYWorkerThread(QThread):
     def stop(self):
         """Stop the worker thread"""
         self.running = False
+        
+        # Close the event loop if it exists
+        if self.loop and not self.loop.is_closed():
+            try:
+                # Stop any pending tasks
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                self.loop.stop()
+                self.loop.close()
+            except Exception:
+                pass
+        
         try:
             if hasattr(self, "Wss") and self.Wss:
                 self.Wss.close()
