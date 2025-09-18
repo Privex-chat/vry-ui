@@ -1,7 +1,8 @@
 @echo off
-title VRY_UI Build Script
+title VRY_UI Build Script - PySide6 Edition
 echo ================================================
-echo   Building VRY_UI (Onefile EXE)
+echo   Building VRY_UI with PySide6-Essentials
+echo   (Optimized for smaller binary size)
 echo ================================================
 echo.
 
@@ -16,19 +17,45 @@ if exist build (
 mkdir build
 
 echo.
-echo ===== Building Onefile EXE Version =====
+echo ===== Building Optimized PySide6 Version =====
+REM Prevent QtWebEngine from creating debug.log
+set QTWEBENGINE_CHROMIUM_FLAGS=--disable-logging --log-level=3
 python -m nuitka main.py ^
   --onefile ^
   --output-dir=build ^
   --remove-output ^
   --assume-yes-for-downloads ^
   --follow-imports ^
-  --enable-plugin=pyqt6 ^
+  --enable-plugin=pyside6 ^
   --include-data-file=config.json=./config.json ^
   --include-package=src ^
   --include-package=asyncio ^
   --include-package=websockets ^
   --include-package=concurrent.futures ^
+  --noinclude-qt-translations ^
+  --nofollow-import-to=PySide6.QtBluetooth ^
+  --nofollow-import-to=PySide6.QtDBus ^
+  --nofollow-import-to=PySide6.QtDesigner ^
+  --nofollow-import-to=PySide6.QtHelp ^
+  --nofollow-import-to=PySide6.QtLocation ^
+  --nofollow-import-to=PySide6.QtMultimedia ^
+  --nofollow-import-to=PySide6.QtMultimediaWidgets ^
+  --nofollow-import-to=PySide6.QtNfc ^
+  --nofollow-import-to=PySide6.QtOpenGL ^
+  --nofollow-import-to=PySide6.QtOpenGLWidgets ^
+  --nofollow-import-to=PySide6.QtPositioning ^
+  --nofollow-import-to=PySide6.QtQuick ^
+  --nofollow-import-to=PySide6.QtQuickWidgets ^
+  --nofollow-import-to=PySide6.QtRemoteObjects ^
+  --nofollow-import-to=PySide6.QtScxml ^
+  --nofollow-import-to=PySide6.QtSensors ^
+  --nofollow-import-to=PySide6.QtSerialPort ^
+  --nofollow-import-to=PySide6.QtSpatialAudio ^
+  --nofollow-import-to=PySide6.QtSql ^
+  --nofollow-import-to=PySide6.QtStateMachine ^
+  --nofollow-import-to=PySide6.QtTest ^
+  --nofollow-import-to=PySide6.QtUiTools ^
+  --nofollow-import-to=PySide6.QtXml ^
   --windows-console-mode=disable ^
   --windows-icon-from-ico=icon.ico ^
   --output-filename=VRY_UI.exe ^
@@ -41,5 +68,6 @@ echo.
 echo ================================================
 echo   ✅ Build Complete!
 echo   Executable created at: build\VRY_UI.exe
+echo   Using PySide6-Essentials for reduced size
 echo ================================================
 pause
