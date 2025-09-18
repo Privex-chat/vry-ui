@@ -1,7 +1,7 @@
 @echo off
-title VRY_UI Build Script - PySide6 Edition
+title VRY_UI Build Script
 echo ================================================
-echo   Building VRY_UI with PySide6-Essentials
+echo           Building VRY_UI 
 echo   (Optimized for smaller binary size)
 echo ================================================
 echo.
@@ -17,7 +17,7 @@ if exist build (
 mkdir build
 
 echo.
-echo ===== Building Optimized PySide6 Version =====
+echo ===== Building =====
 REM Prevent QtWebEngine from creating debug.log
 set QTWEBENGINE_CHROMIUM_FLAGS=--disable-logging --log-level=3
 python -m nuitka main.py ^
@@ -66,8 +66,7 @@ python -m nuitka main.py ^
 
 echo.
 echo ================================================
-echo   ✅ Build Complete!
+echo            ✅ Build Complete!
 echo   Executable created at: build\VRY_UI.exe
-echo   Using PySide6-Essentials for reduced size
 echo ================================================
 pause

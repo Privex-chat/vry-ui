@@ -1,5 +1,5 @@
 """
-Optimized for PySide6's WebEngine
+webview component
 """
 
 import json

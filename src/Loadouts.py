@@ -1,4 +1,3 @@
-# Loadouts.py - Optimized version for fast buddy processing
 import time
 import requests
 from colr import color
@@ -38,7 +37,6 @@ class Loadouts:
             self.log(f"Failed to pre-load buddies: {e}")
 
     def get_buddy_info_batch(self, buddy_uuids):
-        """Get buddy info for multiple UUIDs concurrently"""
         if not buddy_uuids:
             return {}
         

@@ -1,6 +1,5 @@
 """
 VRY - UI v2.12
-Migrated to PySide6-Essentials for reduced binary size
 """
 
 import asyncio
