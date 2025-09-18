@@ -13,6 +13,7 @@ class Ws:
 
         self.lockfile = lockfile
         self.Requests = Requests
+        # websocket.enableTrace(True)
         self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
@@ -129,13 +130,16 @@ class Ws:
             print(message)
 
         self.message_history.append(message)
+    # Add this method to your Ws class in websocket.py
 
     def close(self):
         """Clean up websocket resources"""
         try:
             if hasattr(self, 'websocket_client') and self.websocket_client:
+                # This will be handled by the async context manager
                 pass
             if hasattr(self, 'rpc') and self.rpc:
                 self.rpc.close()
         except Exception as e:
+            # Log error but don't raise - we're cleaning up
             pass

@@ -1,3 +1,4 @@
+# Loadouts.py - Optimized version for fast buddy processing
 import time
 import requests
 from colr import color
@@ -13,13 +14,14 @@ class Loadouts:
         self.colors = colors
         self.Server = Server
         self.current_map = current_map
-        self.buddy_cache = {}
-        self.cache_lock = Lock()
+        self.buddy_cache = {}  # Cache for buddy data
+        self.cache_lock = Lock()  # Thread safety for cache
         
-
+        # Pre-load all buddies on initialization (optional optimization)
         self._preload_buddies()
 
     def _preload_buddies(self):
+        """Pre-load all buddies from API to avoid individual calls"""
         try:
             response = requests.get("https://valorant-api.com/v1/buddies", timeout=10)
             if response.status_code == 200:
@@ -36,9 +38,11 @@ class Loadouts:
             self.log(f"Failed to pre-load buddies: {e}")
 
     def get_buddy_info_batch(self, buddy_uuids):
+        """Get buddy info for multiple UUIDs concurrently"""
         if not buddy_uuids:
             return {}
         
+        # Filter out already cached buddies
         uncached_uuids = []
         results = {}
         
@@ -49,14 +53,16 @@ class Loadouts:
                 else:
                     uncached_uuids.append(uuid)
         
+        # If all are cached, return immediately
         if not uncached_uuids:
             return results
         
+        # Fetch uncached buddies concurrently
         def fetch_single_buddy(buddy_uuid):
             try:
                 response = requests.get(
                     f"https://valorant-api.com/v1/buddies/{buddy_uuid}", 
-                    timeout=5
+                    timeout=5  # 5 second timeout per request
                 )
                 if response.status_code == 200:
                     buddy_data = response.json()
@@ -66,6 +72,7 @@ class Loadouts:
                             "displayName": data["displayName"],
                             "displayIcon": data["displayIcon"]
                         }
+                        # Cache the result
                         with self.cache_lock:
                             self.buddy_cache[buddy_uuid] = buddy_info
                         return buddy_uuid, buddy_info
@@ -73,12 +80,14 @@ class Loadouts:
                 self.log(f"Error fetching buddy {buddy_uuid}: {e}")
             return buddy_uuid, None
         
+        # Use ThreadPoolExecutor for concurrent requests
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_uuid = {
                 executor.submit(fetch_single_buddy, uuid): uuid 
                 for uuid in uncached_uuids
             }
-        
+            
+            # Wait for all requests with a timeout
             try:
                 for future in concurrent.futures.as_completed(future_to_uuid, timeout=15):
                     uuid, buddy_info = future.result()
@@ -126,7 +135,9 @@ class Loadouts:
         return [weaponLists, final_json]
 
     def convertLoadoutToJsonArray(self, PlayerInventorys, players, state, names):
+        """Convert valorant loadouts to json with player names - OPTIMIZED VERSION"""
         
+        # Fetch all required API data with timeouts
         try:
             valoApiSprays = requests.get("https://valorant-api.com/v1/sprays", timeout=10)
             valoApiWeapons = requests.get("https://valorant-api.com/v1/weapons", timeout=10)
@@ -135,6 +146,7 @@ class Loadouts:
             valoApiPlayerCards = requests.get("https://valorant-api.com/v1/playercards", timeout=10)
         except requests.exceptions.RequestException as e:
             self.log(f"Error fetching API data: {e}")
+            # Return minimal structure if API calls fail
             return {"Players": {}, "time": int(time.time()), "map": self.current_map}
 
         final_final_json = {
@@ -147,6 +159,7 @@ class Loadouts:
         if state == "game":
             PlayerInventorys = PlayerInventorys["Loadouts"]
             
+            # OPTIMIZATION: Collect all buddy UUIDs first
             all_buddy_uuids = set()
             for i in range(len(PlayerInventorys)):
                 PlayerInventory = PlayerInventorys[i]["Loadout"]
@@ -157,16 +170,19 @@ class Loadouts:
                             if buddy_uuid:
                                 all_buddy_uuids.add(buddy_uuid)
             
+            # Fetch all buddies at once
             self.log(f"Fetching {len(all_buddy_uuids)} unique buddies...")
             buddy_info_map = self.get_buddy_info_batch(list(all_buddy_uuids))
             self.log(f"Successfully fetched {len(buddy_info_map)} buddy details")
             
+            # Now process each player
             for i in range(len(PlayerInventorys)):
                 PlayerInventory = PlayerInventorys[i]["Loadout"]
                 player_subject = players[i]["Subject"]
                 
                 final_json[player_subject] = {}
 
+                # Create name field
                 if hide_names:
                     for agent in valoApiAgents.json()["data"]:
                         if agent["uuid"] == players[i]["CharacterID"]:
@@ -175,25 +191,30 @@ class Loadouts:
                 else:
                     final_json[player_subject]["Name"] = names[player_subject]
 
+                # Create team field
                 final_json[player_subject]["Team"] = players[i]["TeamID"]
                 final_json[player_subject]["Level"] = players[i]["PlayerIdentity"]["AccountLevel"]
 
+                # Add title
                 for title in valoApiTitles.json()["data"]:
                     if title["uuid"] == players[i]["PlayerIdentity"]["PlayerTitleID"]:
                         final_json[player_subject]["Title"] = title["titleText"]
                         break
 
+                # Add player card
                 for PCard in valoApiPlayerCards.json()["data"]:
                     if PCard["uuid"] == players[i]["PlayerIdentity"]["PlayerCardID"]:
                         final_json[player_subject]["PlayerCard"] = PCard["largeArt"]
                         break
 
+                # Add agent info
                 for agent in valoApiAgents.json()["data"]:
                     if agent["uuid"] == players[i]["CharacterID"]:
                         final_json[player_subject]["AgentArtworkName"] = agent["displayName"] + "Artwork"
                         final_json[player_subject]["Agent"] = agent["displayIcon"]
                         break
 
+                # Process sprays
                 final_json[player_subject]["Sprays"] = {}
                 spray_selections = [
                     s for s in PlayerInventory.get("Expressions", {}).get("AESSelections", [])
@@ -210,18 +231,20 @@ class Loadouts:
                             })
                             break
 
+                # Process weapons
                 final_json[player_subject]["Weapons"] = {}
                 
                 for skin in PlayerInventory["Items"]:
                     final_json[player_subject]["Weapons"][skin] = {}
 
+                    # Process sockets
                     for socket in PlayerInventory["Items"][skin]["Sockets"]:
                         for var_socket in sockets:
                             if socket == sockets[var_socket]:
                                 final_json[player_subject]["Weapons"][skin][var_socket] = \
                                     PlayerInventory["Items"][skin]["Sockets"][socket]["Item"]["ID"]
 
-
+                    # OPTIMIZED BUDDY PROCESSING - use pre-fetched data
                     buddy_uuid = None
                     for socket in PlayerInventory["Items"][skin]["Sockets"]:
                         if socket == sockets["skin_buddy"]:
@@ -236,6 +259,7 @@ class Loadouts:
                             "buddy_displayIcon": buddy_info["displayIcon"]
                         })
 
+                    # Process weapon names and skins
                     for weapon in valoApiWeapons.json()["data"]:
                         if skin == weapon["uuid"]:
                             final_json[player_subject]["Weapons"][skin]["weapon"] = weapon["displayName"]
@@ -258,6 +282,7 @@ class Loadouts:
                                                 final_json[player_subject]["Weapons"][skin]["skinDisplayIcon"] = skinValApi["levels"][0]["displayIcon"]
                                             break
                                     
+                                    # Handle standard skins
                                     if skinValApi["displayName"].startswith("Standard") or skinValApi["displayName"].startswith("Melee"):
                                         final_json[player_subject]["Weapons"][skin]["skinDisplayIcon"] = weapon["displayIcon"]
                                     break

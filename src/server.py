@@ -24,6 +24,7 @@ class Server:
             self.Error.PortError(port)
 
     def stop_server(self):
+        """Properly shutdown the websocket server"""
         if self.server:
             try:
                 self.server.shutdown_gracefully()
