@@ -1,8 +1,6 @@
 """
-VRY - UI v2.11
-Complete refactored version with performance optimizations
-Migrated to PyQt6 for improved WebEngine performance
-Fixed asyncio event loop issues for compiled executables
+VRY - UI v2.12
+Migrated to PySide6-Essentials for reduced binary size
 """
 
 import asyncio
@@ -26,24 +24,25 @@ from colr import color as colr
 from InquirerPy import inquirer
 
 try:
-    from PyQt6.QtCore import (Qt, QUrl, pyqtSignal, QThread, QTimer, 
-                             QSettings, QObject, QDateTime)
-    from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, 
-                                QVBoxLayout, QHBoxLayout, QStackedWidget,
-                                QPushButton, QTextEdit, QLabel, QTabWidget,
-                                QSplitter, QStatusBar, QMenuBar,
-                                QGroupBox, QGridLayout, QCheckBox, QMessageBox, 
-                                QLineEdit, QTableWidget, QTableWidgetItem,
-                                QHeaderView, QComboBox, QColorDialog, QDialog,
-                                QDialogButtonBox, QSpinBox)
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineProfile
-    from PyQt6.QtWebChannel import QWebChannel
-    from PyQt6.QtGui import QFont, QIcon, QTextCursor, QPalette, QColor, QKeySequence, QAction
-    USING_QT6 = True
-except ImportError:
-    print("Please install PyQt6 and PyQt6-WebEngine:")
-    print("pip install PyQt6 PyQt6-WebEngine")
+    from PySide6.QtCore import (Qt, QUrl, Signal, QThread, QTimer, 
+                                QSettings, QObject, QDateTime)
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, 
+                                  QVBoxLayout, QHBoxLayout, QStackedWidget,
+                                  QPushButton, QTextEdit, QLabel, QTabWidget,
+                                  QSplitter, QStatusBar, QMenuBar,
+                                  QGroupBox, QGridLayout, QCheckBox, QMessageBox, 
+                                  QLineEdit, QTableWidget, QTableWidgetItem,
+                                  QHeaderView, QComboBox, QColorDialog, QDialog,
+                                  QDialogButtonBox, QSpinBox)
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWebChannel import QWebChannel
+    from PySide6.QtGui import QFont, QIcon, QTextCursor, QPalette, QColor, QKeySequence, QAction
+    USING_PYSIDE6 = True
+except ImportError as e:
+    print("Please install PySide6-Essentials:")
+    print("pip install PySide6-Essentials")
+    print(f"Error getting system info: {e}")
     sys.exit(1)
 
 # Try to import psutil for resource monitoring
@@ -246,10 +245,10 @@ class SystemResourceMonitor:
 class VRYWorkerThread(QThread):
     """Worker thread for VRY background operations"""
     
-    output_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
-    table_update_signal = pyqtSignal(list, dict)  # rows, metadata
-    status_signal = pyqtSignal(str, str)  # state, extra_info
+    output_signal = Signal(str)
+    error_signal = Signal(str)
+    table_update_signal = Signal(list, dict)  # rows, metadata
+    status_signal = Signal(str, str)  # state, extra_info
     
     def __init__(self, verbose_level=0):
         super().__init__()
@@ -1248,7 +1247,7 @@ class VRYMainWindow(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("VRY - UI v2.11")
+        self.setWindowTitle("VRY - UI v2.12")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
         
@@ -1607,14 +1606,6 @@ class VRYMainWindow(QMainWindow):
                         "Performance mode auto-enabled based on system resources", 
                         3000
                     )
-                    
-                # Note: auto_lightweight_mode code commented out as it doesn't exist in PyQt6 version
-                # if hasattr(self, 'auto_lightweight_mode') and self.auto_lightweight_mode:
-                #     self.matchloadouts_web.lightweight_checkbox.setChecked(True)
-                #     self.status_bar.showMessage(
-                #         "Lightweight mode auto-enabled due to limited resources", 
-                #         3000
-                #     )
             else:
                 # Fallback to standard WebView
                 self.matchloadouts_web = QWebEngineView()
@@ -1875,7 +1866,7 @@ def main():
     # Create Qt application
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName("VRY - UI v2")
+    app.setApplicationName("VRY - UI v2.12")
     app.setOrganizationName("VRY")
     
     # Create and show main window

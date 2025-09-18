@@ -1,20 +1,17 @@
 """
-WebView Performance Optimization for VRY UI - PyQt6 Version
-Prevents crashes and reduces resource consumption
-Optimized for PyQt6's improved WebEngine
+Optimized for PySide6's WebEngine
 """
 
 import json
 import time
-from PyQt6.QtCore import QTimer, QUrl, pyqtSignal, QThread, QObject, Qt
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QLabel, QCheckBox, QHBoxLayout
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineProfile
-from PyQt6.QtWebChannel import QWebChannel
-from PyQt6.QtGui import QFont
+from PySide6.QtCore import QTimer, QUrl, Signal, QThread, QObject, Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QLabel, QCheckBox, QHBoxLayout
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineProfile
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtGui import QFont
 
 class OptimizedWebEnginePage(QWebEnginePage):
-    """Custom WebEnginePage with error handling and resource management"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,11 +33,10 @@ class OptimizedWebEnginePage(QWebEnginePage):
             print(f"[WebView Error] {message}")
 
 class PerformanceWebView(QWebEngineView):
-    """Optimized WebEngineView with performance controls for PyQt6"""
     
-    load_started = pyqtSignal()
-    load_finished = pyqtSignal(bool)
-    resource_warning = pyqtSignal(str)
+    load_started = Signal()
+    load_finished = Signal(bool)
+    resource_warning = Signal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,14 +58,14 @@ class PerformanceWebView(QWebEngineView):
         settings = self.settings()
         profile = self.page().profile()
         
-        # Performance optimizations for PyQt6
+        # Performance optimizations for PySide6
         def safe_set_attribute(attr_name, value):
             """Safely set an attribute if it exists"""
             if hasattr(QWebEngineSettings.WebAttribute, attr_name):
                 attr = getattr(QWebEngineSettings.WebAttribute, attr_name)
                 settings.setAttribute(attr, value)
         
-        # Core settings (these should exist in PyQt6)
+        # Core settings (these should exist in PySide6)
         safe_set_attribute('JavascriptEnabled', True)
         safe_set_attribute('LocalStorageEnabled', False)  # Disable if not needed
         safe_set_attribute('PluginsEnabled', False)
@@ -87,7 +83,7 @@ class PerformanceWebView(QWebEngineView):
         safe_set_attribute('WebGLEnabled', True)
         safe_set_attribute('Accelerated2dCanvasEnabled', True)
         
-        # PyQt6 specific optimizations
+        # PySide6 specific optimizations
         safe_set_attribute('PdfViewerEnabled', False)
         safe_set_attribute('ShowScrollBars', True)
         
@@ -263,7 +259,7 @@ class PerformanceWebView(QWebEngineView):
     def set_active(self, active):
         """Set whether this view is active/visible"""
         self.is_active = active
-        # PyQt6 has better lifecycle management
+        # PySide6 has better lifecycle management
         if hasattr(self.page(), 'setLifecycleState'):
             try:
                 if not active:
@@ -272,7 +268,7 @@ class PerformanceWebView(QWebEngineView):
                 else:
                     self.page().setLifecycleState(QWebEnginePage.LifecycleState.Active)
             except AttributeError:
-                # Lifecycle state might not be available in all PyQt6 versions
+                # Lifecycle state might not be available in all PySide6 versions
                 pass
 
 class LightweightLoadoutView(QWidget):
@@ -342,12 +338,6 @@ class MatchLoadoutsContainer(QWidget):
         self.perf_checkbox.setToolTip("Reduces visual effects for better performance")
         self.perf_checkbox.toggled.connect(self.toggle_performance_mode)
         control_layout.addWidget(self.perf_checkbox)
-        
-        # Lightweight mode toggle (commented out as in original)
-        # self.lightweight_checkbox = QCheckBox("Lightweight View")
-        # self.lightweight_checkbox.setToolTip("Use simplified view (lowest resource usage)")
-        # self.lightweight_checkbox.toggled.connect(self.toggle_lightweight_mode)
-        # control_layout.addWidget(self.lightweight_checkbox)
         
         # Reload button
         self.reload_btn = QPushButton("Reload")
@@ -422,13 +412,6 @@ class MatchLoadoutsContainer(QWidget):
                 self.web_view.inject_performance_css()
                 self.web_view.inject_performance_javascript()
             self.status_label.setText(f"Status: Performance Mode {'ON' if checked else 'OFF'}")
-            
-    def toggle_lightweight_mode(self, checked):
-        """Toggle between web and lightweight views"""
-        if checked:
-            self.show_lightweight_view()
-        else:
-            self.show_web_view()
             
     def reload_view(self):
         """Reload the current view"""
