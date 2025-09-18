@@ -13,7 +13,6 @@ class Ws:
 
         self.lockfile = lockfile
         self.Requests = Requests
-        # websocket.enableTrace(True)
         self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
@@ -130,3 +129,13 @@ class Ws:
             print(message)
 
         self.message_history.append(message)
+
+    def close(self):
+        """Clean up websocket resources"""
+        try:
+            if hasattr(self, 'websocket_client') and self.websocket_client:
+                pass
+            if hasattr(self, 'rpc') and self.rpc:
+                self.rpc.close()
+        except Exception as e:
+            pass
