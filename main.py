@@ -309,11 +309,13 @@ class VRYWorkerThread(QThread):
                 run = True
                 while run and self.running:
                     presence = self.presences.get_presence()
-                    if self.presences.get_private_presence(presence) is not None:
+                    private_presence = self.presences.get_private_presence(presence)
+                    # wait until your own valorant presence is initialized
+                    if private_presence is not None:
                         if self.cfg.get_feature_flag("discord_rpc"):
-                            self.rpc.set_rpc(self.presences.get_private_presence(presence))
-                        self.game_state = self.presences.get_game_state(presence)
-                        if self.game_state is not None:
+                            self.rpc.set_rpc(private_presence)
+                        game_state = self.presences.get_game_state(presence)
+                        if game_state is not None:
                             run = False
                     for _ in range(20):
                         if not self.running:
@@ -342,7 +344,7 @@ class VRYWorkerThread(QThread):
             presence = self.presences.get_presence()
             priv_presence = self.presences.get_private_presence(presence)
             
-            if priv_presence["provisioningFlow"] == "CustomGame" or priv_presence["partyState"] == "CUSTOM_GAME_SETUP":
+            if priv_presence["provisioningFlow"] == "CustomGame" or priv_presence["partyPresenceData"]["partyState"] == "CUSTOM_GAME_SETUP":
                 gamemode = "Custom Game"
             else:
                 gamemode = gamemodes.get(priv_presence["queueId"])
