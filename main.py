@@ -1,5 +1,6 @@
 """
-VRY - UI v2.12
+VRY - UI v2.13
+Updated with starting_side, faster player display, and freeze functionality
 """
 
 import asyncio
@@ -167,6 +168,7 @@ class VRYWorkerThread(QThread):
     output_signal = Signal(str)
     error_signal = Signal(str)
     table_update_signal = Signal(list, dict)
+    table_row_signal = Signal(dict, dict)  # New signal for individual row updates
     status_signal = Signal(str, str)
     
     def __init__(self, verbose_level=0):
@@ -177,6 +179,11 @@ class VRYWorkerThread(QThread):
         self.firstTime = True
         self.verbose_level = verbose_level
         self.loop = None
+        self.freeze_table = False  # New freeze state
+        
+    def set_freeze_state(self, frozen):
+        """Set the freeze state for table updates"""
+        self.freeze_table = frozen
         
     def initialize_vry(self):
         try:
@@ -341,6 +348,10 @@ class VRYWorkerThread(QThread):
                     self.rank.invalidate_cached_responses()
                 self.log(f"new game state: {self.game_state}")
             
+            # Don't process if table is frozen
+            if self.freeze_table:
+                return
+            
             presence = self.presences.get_presence()
             priv_presence = self.presences.get_private_presence(presence)
             
@@ -354,18 +365,26 @@ class VRYWorkerThread(QThread):
                 "PREGAME": "Agent Select",
                 "MENUS": "In-Menus"
             }
-            self.status_signal.emit(self.game_state, gamemode)
+            
+            # Prepare status with starting_side info
+            status_extra = gamemode
             
             table_data = []
             metadata = {"state": self.game_state, "mode": gamemode}
             
             if self.game_state == "INGAME":
-                table_data, metadata = self.process_ingame_state(presence)
+                table_data, metadata = self.process_ingame_state_streaming(presence)
             elif self.game_state == "PREGAME":
-                table_data, metadata = self.process_pregame_state(presence)
+                table_data, metadata = self.process_pregame_state_streaming(presence)
+                # Add starting_side to status for pregame
+                if metadata.get("starting_side"):
+                    status_extra = f"{gamemode} • {metadata['starting_side']}"
             elif self.game_state == "MENUS":
-                table_data, metadata = self.process_menu_state(presence)
+                table_data, metadata = self.process_menu_state_streaming(presence)
             
+            self.status_signal.emit(self.game_state, status_extra)
+            
+            # Send final complete update if we have data
             if table_data:
                 self.table_update_signal.emit(table_data, metadata)
                 
@@ -382,13 +401,18 @@ class VRYWorkerThread(QThread):
             return f"{rank_text} ({episode}A{act})"
         return rank_text
     
-    def process_ingame_state(self, presence):
+    def process_ingame_state_streaming(self, presence):
+        """Process in-game state with streaming row updates"""
         table_data = []
         metadata = {"state": "INGAME"}
         
         coregame_stats = self.coregame.get_coregame_stats()
         if not coregame_stats:
             return table_data, metadata
+        
+        # Clear table for new data
+        metadata["clear_table"] = True
+        self.table_update_signal.emit([], metadata)
         
         Players = coregame_stats["Players"]
         partyMembers = self.menu.get_party_members(self.Requests.puuid, presence)
@@ -432,7 +456,11 @@ class VRYWorkerThread(QThread):
                 allyTeam = p["TeamID"]
                 break
         
+        # Process players and emit rows as they're ready
         for player in Players:
+            if not self.running or self.freeze_table:
+                break
+                
             party_icon = ""
             for party in partyOBJ:
                 if player["Subject"] in partyOBJ[party]:
@@ -478,6 +506,11 @@ class VRYWorkerThread(QThread):
                 "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
+            
+            # Emit individual row update
+            if not self.freeze_table:
+                self.table_row_signal.emit(row_data, metadata)
+            
             table_data.append(row_data)
             
             self.stats.save_data({
@@ -494,13 +527,25 @@ class VRYWorkerThread(QThread):
         
         return table_data, metadata
     
-    def process_pregame_state(self, presence):
+    def process_pregame_state_streaming(self, presence):
+        """Process pregame state with streaming row updates and starting_side"""
         table_data = []
         metadata = {"state": "PREGAME"}
         
         pregame_stats = self.pregame.get_pregame_stats()
         if not pregame_stats:
             return table_data, metadata
+        
+        # Get starting side info
+        if self.cfg.get_feature_flag("starting_side") and pregame_stats:
+            team_id = pregame_stats.get("AllyTeam", {}).get("TeamID")
+            if team_id:
+                starting_side = "Attacker" if team_id == "Red" else "Defender"
+                metadata["starting_side"] = starting_side
+        
+        # Clear table for new data
+        metadata["clear_table"] = True
+        self.table_update_signal.emit([], metadata)
         
         Players = pregame_stats["AllyTeam"]["Players"]
         self.presences.wait_for_presence(self.namesClass.get_players_puuid(Players))
@@ -515,7 +560,11 @@ class VRYWorkerThread(QThread):
         partyIcons = {}
         partyCount = 0
         
+        # Process players and emit rows as they're ready
         for player in Players:
+            if not self.running or self.freeze_table:
+                break
+                
             party_icon = ""
             for party in partyOBJ:
                 if player["Subject"] in partyOBJ[party]:
@@ -562,13 +611,23 @@ class VRYWorkerThread(QThread):
                 "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
+            
+            # Emit individual row update
+            if not self.freeze_table:
+                self.table_row_signal.emit(row_data, metadata)
+            
             table_data.append(row_data)
         
         return table_data, metadata
     
-    def process_menu_state(self, presence):
+    def process_menu_state_streaming(self, presence):
+        """Process menu state with streaming row updates"""
         table_data = []
         metadata = {"state": "MENUS"}
+        
+        # Clear table for new data
+        metadata["clear_table"] = True
+        self.table_update_signal.emit([], metadata)
         
         Players = self.menu.get_party_members(self.Requests.puuid, presence)
         names = self.namesClass.get_names_from_puuids(Players)
@@ -577,7 +636,7 @@ class VRYWorkerThread(QThread):
         
         seen = []
         for player in Players:
-            if player["Subject"] not in seen:
+            if player["Subject"] not in seen and not self.freeze_table:
                 playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
                 previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
                 ppstats = self.pstats.get_stats(player["Subject"])
@@ -610,6 +669,11 @@ class VRYWorkerThread(QThread):
                     "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                     "afk_penalty": ppstats.get("AFKPenalty", "N/A")
                 }
+                
+                # Emit individual row update
+                if not self.freeze_table:
+                    self.table_row_signal.emit(row_data, metadata)
+                
                 table_data.append(row_data)
                 seen.append(player["Subject"])
         
@@ -650,6 +714,8 @@ class VRYTableWidget(QTableWidget):
     def __init__(self):
         super().__init__()
         self.current_theme = THEMES["Dark"]
+        self.frozen_data = []  # Store frozen data
+        self.is_frozen = False
         self.setup_table()
         
     def setup_table(self):
@@ -753,9 +819,53 @@ class VRYTableWidget(QTableWidget):
             if self.columnWidth(col) < 40:
                 self.setColumnWidth(col, 40)
 
+    def freeze_table(self, freeze):
+        """Freeze or unfreeze the table data"""
+        self.is_frozen = freeze
+        if freeze:
+            # Store current table data
+            self.frozen_data = []
+            for row in range(self.rowCount()):
+                row_data = []
+                for col in range(self.columnCount()):
+                    item = self.item(row, col)
+                    if item:
+                        row_data.append((item.text(), item.foreground()))
+                    else:
+                        row_data.append((None, None))
+                self.frozen_data.append(row_data)
+        else:
+            self.frozen_data = []
+    
+    def add_row_streaming(self, row_data, metadata):
+        """Add a single row to the table (for streaming updates)"""
+        if self.is_frozen:
+            return
+            
+        if metadata.get("clear_table"):
+            self.setRowCount(0)
+            
+        row_position = self.rowCount()
+        self.insertRow(row_position)
+        self._populate_row(row_position, row_data, metadata)
+        
     def update_table(self, data, metadata):
+        """Update entire table at once"""
+        if self.is_frozen:
+            return
+            
         self.setRowCount(0)
-
+        
+        for row_data in data:
+            row_position = self.rowCount()
+            self.insertRow(row_position)
+            self._populate_row(row_position, row_data, metadata)
+        
+        self.resizeColumnsToContents()
+        self._update_column_visibility(metadata)
+    
+    def _populate_row(self, row_position, row_data, metadata):
+        """Helper method to populate a single row"""
         def safe_float(value, default=0.0):
             try:
                 return float(value)
@@ -794,147 +904,156 @@ class VRYTableWidget(QTableWidget):
 
         privacy_enabled = bool(metadata.get('incognito_privacy', True))
 
-        for row_data in data:
-            row_position = self.rowCount()
-            self.insertRow(row_position)
+        # Column 0: Party
+        party_item, _ = parse_and_create_item(row_data.get("party", ""))
+        party_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 0, party_item)
 
-            party_item, _ = parse_and_create_item(row_data.get("party", ""))
-            party_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 0, party_item)
+        # Column 1: Agent
+        agent_item, agent_colored = parse_and_create_item(row_data.get("agent", ""))
+        if not agent_colored and "agent_state" in row_data:
+            if row_data["agent_state"] == "locked":
+                agent_item.setForeground(QColor(255, 255, 255))
+            elif row_data["agent_state"] == "selected":
+                agent_item.setForeground(QColor(128, 128, 128))
+            else:
+                agent_item.setForeground(QColor(54, 53, 51))
+        agent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 1, agent_item)
 
-            agent_item, agent_colored = parse_and_create_item(row_data.get("agent", ""))
-            if not agent_colored and "agent_state" in row_data:
-                if row_data["agent_state"] == "locked":
-                    agent_item.setForeground(QColor(255, 255, 255))
-                elif row_data["agent_state"] == "selected":
-                    agent_item.setForeground(QColor(128, 128, 128))
+        # Column 2: Name
+        name_raw = row_data.get("name", "")
+        incog_flag = bool(row_data.get("incognito", False))
+        is_self = bool(row_data.get("is_self", False))
+        is_party = bool(row_data.get("is_party", False))
+
+        if incog_flag and privacy_enabled and not is_self and not is_party:
+            name_item = QTableWidgetItem("Incognito")
+            font = QFont()
+            font.setBold(True)
+            name_item.setFont(font)
+            name_item.setForeground(QColor(128, 0, 0))
+            skip_team_coloring = True
+        else:
+            display_name = ("*" + str(name_raw)) if (incog_flag and not privacy_enabled) else str(name_raw)
+            name_item, name_colored = parse_and_create_item(display_name)
+            skip_team_coloring = False
+
+        if not skip_team_coloring and not name_colored:
+            if is_self:
+                name_item.setForeground(QColor(255, 215, 0))
+            elif is_party:
+                name_item.setForeground(QColor(76, 151, 237))
+            elif "team" in row_data and "ally_team" in row_data:
+                if row_data["team"] == row_data.get("ally_team"):
+                    name_item.setForeground(QColor(0, 255, 127))
                 else:
-                    agent_item.setForeground(QColor(54, 53, 51))
-            agent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 1, agent_item)
+                    name_item.setForeground(QColor(255, 69, 0))
 
-            name_raw = row_data.get("name", "")
-            incog_flag = bool(row_data.get("incognito", False))
-            is_self = bool(row_data.get("is_self", False))
-            is_party = bool(row_data.get("is_party", False))
+        self.setItem(row_position, 2, name_item)
 
-            if incog_flag and privacy_enabled and not is_self and not is_party:
-                name_item = QTableWidgetItem("Incognito")
-                font = QFont()
-                font.setBold(True)
-                name_item.setFont(font)
-                name_item.setForeground(QColor(128, 0, 0))
-                skip_team_coloring = True
-            else:
-                display_name = ("*" + str(name_raw)) if (incog_flag and not privacy_enabled) else str(name_raw)
-                name_item, name_colored = parse_and_create_item(display_name)
-                skip_team_coloring = False
+        # Remaining columns...
+        skin_item, _ = parse_and_create_item(row_data.get("skin", ""))
+        self.setItem(row_position, 3, skin_item)
 
-            if not skip_team_coloring and not name_colored:
-                if is_self:
-                    name_item.setForeground(QColor(255, 215, 0))
-                elif is_party:
-                    name_item.setForeground(QColor(76, 151, 237))
-                elif "team" in row_data and "ally_team" in row_data:
-                    if row_data["team"] == row_data.get("ally_team"):
-                        name_item.setForeground(QColor(0, 255, 127))
-                    else:
-                        name_item.setForeground(QColor(255, 69, 0))
+        rank_text = format_rank_with_episode(
+            row_data.get("rank", ""),
+            row_data.get("rank_act"),
+            row_data.get("rank_ep")
+        )
+        rank_item, _ = parse_and_create_item(rank_text)
+        self.setItem(row_position, 4, rank_item)
 
-            self.setItem(row_position, 2, name_item)
+        rr_val = safe_int(row_data.get("rr", 0))
+        rr_item = QTableWidgetItem(str(rr_val))
+        rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 5, rr_item)
 
-            skin_item, _ = parse_and_create_item(row_data.get("skin", ""))
-            self.setItem(row_position, 3, skin_item)
+        peak_text = format_rank_with_episode(
+            row_data.get("peak_rank", ""),
+            row_data.get("peak_act"),
+            row_data.get("peak_ep")
+        )
+        peak_item, _ = parse_and_create_item(peak_text)
+        self.setItem(row_position, 6, peak_item)
 
-            rank_text = format_rank_with_episode(
-                row_data.get("rank", ""),
-                row_data.get("rank_act"),
-                row_data.get("rank_ep")
-            )
-            rank_item, _ = parse_and_create_item(rank_text)
-            self.setItem(row_position, 4, rank_item)
+        prev_text = format_rank_with_episode(
+            row_data.get("previous_rank", ""),
+            row_data.get("previous_act"),
+            row_data.get("previous_ep")
+        )
+        prev_item, _ = parse_and_create_item(prev_text)
+        self.setItem(row_position, 7, prev_item)
 
-            rr_val = safe_int(row_data.get("rr", 0))
-            rr_item = QTableWidgetItem(str(rr_val))
-            rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 5, rr_item)
+        lb_val = safe_int(row_data.get("leaderboard", 0))
+        lb_item = QTableWidgetItem(str(lb_val) if lb_val > 0 else "")
+        lb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 8, lb_item)
 
-            peak_text = format_rank_with_episode(
-                row_data.get("peak_rank", ""),
-                row_data.get("peak_act"),
-                row_data.get("peak_ep")
-            )
-            peak_item, _ = parse_and_create_item(peak_text)
-            self.setItem(row_position, 6, peak_item)
+        hs_val = row_data.get("hs", "N/A")
+        if hs_val != "N/A":
+            hs_display = f"{safe_float(hs_val):.1f}%"
+        else:
+            hs_display = "N/A"
+        hs_item = QTableWidgetItem(hs_display)
+        hs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 9, hs_item)
 
-            prev_text = format_rank_with_episode(
-                row_data.get("previous_rank", ""),
-                row_data.get("previous_act"),
-                row_data.get("previous_ep")
-            )
-            prev_item, _ = parse_and_create_item(prev_text)
-            self.setItem(row_position, 7, prev_item)
+        wr_val = row_data.get("wr", "N/a")
+        games_val = safe_int(row_data.get("games", 0))
+        if wr_val != "N/a":
+            wr_display = f"{safe_int(wr_val)}% ({games_val})"
+        else:
+            wr_display = f"N/A ({games_val})"
+        wr_item = QTableWidgetItem(wr_display)
+        wr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 10, wr_item)
 
-            lb_val = safe_int(row_data.get("leaderboard", 0))
-            lb_item = QTableWidgetItem(str(lb_val) if lb_val > 0 else "")
-            lb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 8, lb_item)
+        kd_val = row_data.get("kd", "N/A")
+        if kd_val != "N/A":
+            kd_display = f"{safe_float(kd_val):.2f}"
+        else:
+            kd_display = "N/A"
+        kd_item = QTableWidgetItem(kd_display)
+        kd_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 11, kd_item)
 
-            hs_val = row_data.get("hs", "N/A")
-            if hs_val != "N/A":
-                hs_display = f"{safe_float(hs_val):.1f}%"
-            else:
-                hs_display = "N/A"
-            hs_item = QTableWidgetItem(hs_display)
-            hs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 9, hs_item)
-
-            wr_val = row_data.get("wr", "N/a")
-            games_val = safe_int(row_data.get("games", 0))
-            if wr_val != "N/a":
-                wr_display = f"{safe_int(wr_val)}% ({games_val})"
-            else:
-                wr_display = f"N/A ({games_val})"
-            wr_item = QTableWidgetItem(wr_display)
-            wr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 10, wr_item)
-
-            kd_val = row_data.get("kd", "N/A")
-            if kd_val != "N/A":
-                kd_display = f"{safe_float(kd_val):.2f}"
-            else:
-                kd_display = "N/A"
-            kd_item = QTableWidgetItem(kd_display)
-            kd_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 11, kd_item)
-
-            level_val = row_data.get("level", "")
-            if row_data.get("hide_level") and not is_self and not is_party:
-                level_val = ""
-            level_item = QTableWidgetItem(str(level_val))
-            level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 12, level_item)
-
-            earned_rr = row_data.get("earned_rr", "N/A")
-            afk_penalty = row_data.get("afk_penalty", "N/A")
-            
-            if earned_rr != "N/A" and afk_penalty != "N/A":
-                earned_display = f"{earned_rr:+d}"
-                if afk_penalty != 0:
-                    earned_display += f" ({afk_penalty})"
-                rr_item = QTableWidgetItem(earned_display)
-                if earned_rr > 0:
-                    rr_item.setForeground(QColor(0, 255, 0))
-                elif earned_rr < 0:
-                    rr_item.setForeground(QColor(255, 0, 0))
-            else:
-                rr_item = QTableWidgetItem("")
-            
-            rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 13, rr_item)
-
-        self.resizeColumnsToContents()
+        level_val = row_data.get("level", "")
+        # Only hide level if ALL conditions are met:
+        # 1. Player has level hiding enabled
+        # 2. Not current user
+        # 3. Not in party
+        # 4. Incognito privacy is ON
+        if (row_data.get("hide_level") and 
+            not is_self and 
+            not is_party and 
+            metadata.get('incognito_privacy', True)):
+            level_val = ""
+        level_item = QTableWidgetItem(str(level_val))
         
+        level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 12, level_item)
+
+        earned_rr = row_data.get("earned_rr", "N/A")
+        afk_penalty = row_data.get("afk_penalty", "N/A")
+        
+        if earned_rr != "N/A" and afk_penalty != "N/A":
+            earned_display = f"{earned_rr:+d}"
+            if afk_penalty != 0:
+                earned_display += f" ({afk_penalty})"
+            rr_item = QTableWidgetItem(earned_display)
+            if earned_rr > 0:
+                rr_item.setForeground(QColor(0, 255, 0))
+            elif earned_rr < 0:
+                rr_item.setForeground(QColor(255, 0, 0))
+        else:
+            rr_item = QTableWidgetItem("")
+        
+        rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 13, rr_item)
+    
+    def _update_column_visibility(self, metadata):
+        """Update column visibility based on game state"""
         if metadata.get("state") == "MENUS":
             self.setColumnHidden(0, True)
             self.setColumnHidden(1, True)
@@ -1057,7 +1176,7 @@ class VRYMainWindow(QMainWindow):
             print(f"Resource monitoring error: {e}")
     
     def init_ui(self):
-        self.setWindowTitle("VRY - UI v2.12")
+        self.setWindowTitle("VRY - UI v2.13")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
         
@@ -1090,6 +1209,13 @@ class VRYMainWindow(QMainWindow):
         
         status_layout.addStretch()
         
+        # Add Freeze button
+        self.freeze_btn = QPushButton("❄ Freeze Table")
+        self.freeze_btn.setCheckable(True)
+        self.freeze_btn.setMaximumWidth(140)
+        self.freeze_btn.clicked.connect(self.toggle_freeze)
+        status_layout.addWidget(self.freeze_btn)
+        
         self.refresh_btn = QPushButton("↻ Refresh")
         self.refresh_btn.setMaximumWidth(100)
         self.refresh_btn.clicked.connect(self.refresh_data)
@@ -1115,6 +1241,27 @@ class VRYMainWindow(QMainWindow):
         self.status_bar.showMessage("Ready")
         
         self.apply_theme(self.current_theme)
+    
+    def toggle_freeze(self, checked):
+        """Toggle freeze state of the table"""
+        self.player_table.freeze_table(checked)
+        if self.worker_thread:
+            self.worker_thread.set_freeze_state(checked)
+        
+        if checked:
+            self.freeze_btn.setText("❄ Unfreeze Table")
+            self.freeze_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #4a90e2;
+                    color: white;
+                    font-weight: bold;
+                }}
+            """)
+            self.status_bar.showMessage("Table frozen - updates paused", 3000)
+        else:
+            self.freeze_btn.setText("❄ Freeze Table")
+            self.freeze_btn.setStyleSheet("")
+            self.status_bar.showMessage("Table unfrozen - updates resumed", 3000)
     
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -1495,14 +1642,26 @@ class VRYMainWindow(QMainWindow):
         self.worker_thread.output_signal.connect(self.on_console_output)
         self.worker_thread.error_signal.connect(self.on_console_error)
         self.worker_thread.table_update_signal.connect(self.on_table_update)
+        self.worker_thread.table_row_signal.connect(self.on_table_row_update)  # New connection
         self.worker_thread.status_signal.connect(self.on_status_update)
         self.worker_thread.start()
     
     def refresh_data(self):
         if self.worker_thread and self.worker_thread.running:
+            # Temporarily unfreeze if frozen
+            was_frozen = self.freeze_btn.isChecked()
+            if was_frozen:
+                self.freeze_btn.setChecked(False)
+                self.toggle_freeze(False)
+            
             if self.worker_thread.verbose_level > 0:
                 self.console_output.append("Refreshing data...\n")
             self.status_bar.showMessage("Refreshing...", 2000)
+            
+            # Re-freeze after a short delay if it was frozen
+            if was_frozen:
+                QTimer.singleShot(500, lambda: self.freeze_btn.setChecked(True))
+                QTimer.singleShot(500, lambda: self.toggle_freeze(True))
     
     def on_console_output(self, text):
         self.console_output.append(text)
@@ -1511,14 +1670,22 @@ class VRYMainWindow(QMainWindow):
         self.console_output.append(f"ERROR: {text}")
         self.status_bar.showMessage(f"Error: {text}", 5000)
     
+    def on_table_row_update(self, row_data, metadata):
+        """Handle individual row updates for streaming display"""
+        if not self.freeze_btn.isChecked():
+            md = dict(metadata) if metadata else {}
+            md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
+            self.player_table.add_row_streaming(row_data, md)
+    
     def on_table_update(self, data, metadata):
         self.player_table_data = data
         md = dict(metadata) if metadata else {}
         md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
         self.player_table_metadata = md
         
-        self.player_table.update_table(data, md)
-        self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
+        if not self.freeze_btn.isChecked():
+            self.player_table.update_table(data, md)
+            self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
     
     def on_status_update(self, state, extra_info):
         state_display = {
@@ -1529,6 +1696,11 @@ class VRYMainWindow(QMainWindow):
         
         status_text = f"Status: {state_display}"
         if extra_info:
+            # Handle starting_side display
+            if "Attacker" in extra_info:
+                extra_info = extra_info.replace("Attacker", "⚔️ Attacker")
+            elif "Defender" in extra_info:
+                extra_info = extra_info.replace("Defender", "🛡️ Defender")
             status_text += f" • {extra_info}"
         
         self.status_label.setText(status_text)
@@ -1606,7 +1778,7 @@ def main():
     
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName("VRY - UI v2.12")
+    app.setApplicationName("VRY - UI v2.13")
     app.setOrganizationName("VRY")
     
     window = VRYMainWindow()
