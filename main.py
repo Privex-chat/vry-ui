@@ -1,6 +1,6 @@
 """
 VRY - UI v2.13
-Updated with starting_side, faster player display, and freeze functionality
+updated with starting_side, faster player display, and freeze functionality
 """
 
 import asyncio
@@ -168,7 +168,7 @@ class VRYWorkerThread(QThread):
     output_signal = Signal(str)
     error_signal = Signal(str)
     table_update_signal = Signal(list, dict)
-    table_row_signal = Signal(dict, dict)  # New signal for individual row updates
+    table_row_signal = Signal(dict, dict)
     status_signal = Signal(str, str)
     
     def __init__(self, verbose_level=0):
@@ -182,7 +182,6 @@ class VRYWorkerThread(QThread):
         self.freeze_table = False  # New freeze state
         
     def set_freeze_state(self, frozen):
-        """Set the freeze state for table updates"""
         self.freeze_table = frozen
         
     def initialize_vry(self):
@@ -348,7 +347,7 @@ class VRYWorkerThread(QThread):
                     self.rank.invalidate_cached_responses()
                 self.log(f"new game state: {self.game_state}")
             
-            # Don't process if table is frozen
+            # dont process if table is frozen
             if self.freeze_table:
                 return
             
@@ -366,7 +365,6 @@ class VRYWorkerThread(QThread):
                 "MENUS": "In-Menus"
             }
             
-            # Prepare status with starting_side info
             status_extra = gamemode
             
             table_data = []
@@ -376,7 +374,6 @@ class VRYWorkerThread(QThread):
                 table_data, metadata = self.process_ingame_state_streaming(presence)
             elif self.game_state == "PREGAME":
                 table_data, metadata = self.process_pregame_state_streaming(presence)
-                # Add starting_side to status for pregame
                 if metadata.get("starting_side"):
                     status_extra = f"{gamemode} • {metadata['starting_side']}"
             elif self.game_state == "MENUS":
@@ -384,7 +381,6 @@ class VRYWorkerThread(QThread):
             
             self.status_signal.emit(self.game_state, status_extra)
             
-            # Send final complete update if we have data
             if table_data:
                 self.table_update_signal.emit(table_data, metadata)
                 
@@ -402,7 +398,6 @@ class VRYWorkerThread(QThread):
         return rank_text
     
     def process_ingame_state_streaming(self, presence):
-        """Process in-game state with streaming row updates"""
         table_data = []
         metadata = {"state": "INGAME"}
         
@@ -410,7 +405,6 @@ class VRYWorkerThread(QThread):
         if not coregame_stats:
             return table_data, metadata
         
-        # Clear table for new data
         metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
         
@@ -456,7 +450,6 @@ class VRYWorkerThread(QThread):
                 allyTeam = p["TeamID"]
                 break
         
-        # Process players and emit rows as they're ready
         for player in Players:
             if not self.running or self.freeze_table:
                 break
@@ -507,7 +500,6 @@ class VRYWorkerThread(QThread):
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
             
-            # Emit individual row update
             if not self.freeze_table:
                 self.table_row_signal.emit(row_data, metadata)
             
@@ -528,7 +520,6 @@ class VRYWorkerThread(QThread):
         return table_data, metadata
     
     def process_pregame_state_streaming(self, presence):
-        """Process pregame state with streaming row updates and starting_side"""
         table_data = []
         metadata = {"state": "PREGAME"}
         
@@ -536,14 +527,12 @@ class VRYWorkerThread(QThread):
         if not pregame_stats:
             return table_data, metadata
         
-        # Get starting side info
         if self.cfg.get_feature_flag("starting_side") and pregame_stats:
             team_id = pregame_stats.get("AllyTeam", {}).get("TeamID")
             if team_id:
                 starting_side = "Attacker" if team_id == "Red" else "Defender"
                 metadata["starting_side"] = starting_side
         
-        # Clear table for new data
         metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
         
@@ -560,7 +549,6 @@ class VRYWorkerThread(QThread):
         partyIcons = {}
         partyCount = 0
         
-        # Process players and emit rows as they're ready
         for player in Players:
             if not self.running or self.freeze_table:
                 break
@@ -612,7 +600,6 @@ class VRYWorkerThread(QThread):
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
             
-            # Emit individual row update
             if not self.freeze_table:
                 self.table_row_signal.emit(row_data, metadata)
             
@@ -621,11 +608,9 @@ class VRYWorkerThread(QThread):
         return table_data, metadata
     
     def process_menu_state_streaming(self, presence):
-        """Process menu state with streaming row updates"""
         table_data = []
         metadata = {"state": "MENUS"}
         
-        # Clear table for new data
         metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
         
@@ -670,7 +655,6 @@ class VRYWorkerThread(QThread):
                     "afk_penalty": ppstats.get("AFKPenalty", "N/A")
                 }
                 
-                # Emit individual row update
                 if not self.freeze_table:
                     self.table_row_signal.emit(row_data, metadata)
                 
@@ -714,7 +698,7 @@ class VRYTableWidget(QTableWidget):
     def __init__(self):
         super().__init__()
         self.current_theme = THEMES["Dark"]
-        self.frozen_data = []  # Store frozen data
+        self.frozen_data = []
         self.is_frozen = False
         self.setup_table()
         
@@ -820,10 +804,8 @@ class VRYTableWidget(QTableWidget):
                 self.setColumnWidth(col, 40)
 
     def freeze_table(self, freeze):
-        """Freeze or unfreeze the table data"""
         self.is_frozen = freeze
         if freeze:
-            # Store current table data
             self.frozen_data = []
             for row in range(self.rowCount()):
                 row_data = []
@@ -838,7 +820,6 @@ class VRYTableWidget(QTableWidget):
             self.frozen_data = []
     
     def add_row_streaming(self, row_data, metadata):
-        """Add a single row to the table (for streaming updates)"""
         if self.is_frozen:
             return
             
@@ -850,7 +831,6 @@ class VRYTableWidget(QTableWidget):
         self._populate_row(row_position, row_data, metadata)
         
     def update_table(self, data, metadata):
-        """Update entire table at once"""
         if self.is_frozen:
             return
             
@@ -865,7 +845,6 @@ class VRYTableWidget(QTableWidget):
         self._update_column_visibility(metadata)
     
     def _populate_row(self, row_position, row_data, metadata):
-        """Helper method to populate a single row"""
         def safe_float(value, default=0.0):
             try:
                 return float(value)
@@ -904,12 +883,12 @@ class VRYTableWidget(QTableWidget):
 
         privacy_enabled = bool(metadata.get('incognito_privacy', True))
 
-        # Column 0: Party
+        # column 0: party
         party_item, _ = parse_and_create_item(row_data.get("party", ""))
         party_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 0, party_item)
 
-        # Column 1: Agent
+        # column 1: agent
         agent_item, agent_colored = parse_and_create_item(row_data.get("agent", ""))
         if not agent_colored and "agent_state" in row_data:
             if row_data["agent_state"] == "locked":
@@ -921,7 +900,7 @@ class VRYTableWidget(QTableWidget):
         agent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 1, agent_item)
 
-        # Column 2: Name
+        # column 2: name
         name_raw = row_data.get("name", "")
         incog_flag = bool(row_data.get("incognito", False))
         is_self = bool(row_data.get("is_self", False))
@@ -952,7 +931,7 @@ class VRYTableWidget(QTableWidget):
 
         self.setItem(row_position, 2, name_item)
 
-        # Remaining columns...
+        # remaining columns
         skin_item, _ = parse_and_create_item(row_data.get("skin", ""))
         self.setItem(row_position, 3, skin_item)
 
@@ -1053,7 +1032,6 @@ class VRYTableWidget(QTableWidget):
         self.setItem(row_position, 13, rr_item)
     
     def _update_column_visibility(self, metadata):
-        """Update column visibility based on game state"""
         if metadata.get("state") == "MENUS":
             self.setColumnHidden(0, True)
             self.setColumnHidden(1, True)
@@ -1209,7 +1187,6 @@ class VRYMainWindow(QMainWindow):
         
         status_layout.addStretch()
         
-        # Add Freeze button
         self.freeze_btn = QPushButton("❄ Freeze Table")
         self.freeze_btn.setCheckable(True)
         self.freeze_btn.setMaximumWidth(140)
@@ -1243,7 +1220,6 @@ class VRYMainWindow(QMainWindow):
         self.apply_theme(self.current_theme)
     
     def toggle_freeze(self, checked):
-        """Toggle freeze state of the table"""
         self.player_table.freeze_table(checked)
         if self.worker_thread:
             self.worker_thread.set_freeze_state(checked)
@@ -1642,13 +1618,12 @@ class VRYMainWindow(QMainWindow):
         self.worker_thread.output_signal.connect(self.on_console_output)
         self.worker_thread.error_signal.connect(self.on_console_error)
         self.worker_thread.table_update_signal.connect(self.on_table_update)
-        self.worker_thread.table_row_signal.connect(self.on_table_row_update)  # New connection
+        self.worker_thread.table_row_signal.connect(self.on_table_row_update)
         self.worker_thread.status_signal.connect(self.on_status_update)
         self.worker_thread.start()
     
     def refresh_data(self):
         if self.worker_thread and self.worker_thread.running:
-            # Temporarily unfreeze if frozen
             was_frozen = self.freeze_btn.isChecked()
             if was_frozen:
                 self.freeze_btn.setChecked(False)
@@ -1658,7 +1633,6 @@ class VRYMainWindow(QMainWindow):
                 self.console_output.append("Refreshing data...\n")
             self.status_bar.showMessage("Refreshing...", 2000)
             
-            # Re-freeze after a short delay if it was frozen
             if was_frozen:
                 QTimer.singleShot(500, lambda: self.freeze_btn.setChecked(True))
                 QTimer.singleShot(500, lambda: self.toggle_freeze(True))
@@ -1671,7 +1645,6 @@ class VRYMainWindow(QMainWindow):
         self.status_bar.showMessage(f"Error: {text}", 5000)
     
     def on_table_row_update(self, row_data, metadata):
-        """Handle individual row updates for streaming display"""
         if not self.freeze_btn.isChecked():
             md = dict(metadata) if metadata else {}
             md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
@@ -1696,7 +1669,6 @@ class VRYMainWindow(QMainWindow):
         
         status_text = f"Status: {state_display}"
         if extra_info:
-            # Handle starting_side display
             if "Attacker" in extra_info:
                 extra_info = extra_info.replace("Attacker", "⚔️ Attacker")
             elif "Defender" in extra_info:
