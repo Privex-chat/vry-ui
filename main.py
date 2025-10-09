@@ -347,7 +347,6 @@ class VRYWorkerThread(QThread):
                     self.rank.invalidate_cached_responses()
                 self.log(f"new game state: {self.game_state}")
             
-            # dont process if table is frozen
             if self.freeze_table:
                 return
             
@@ -370,14 +369,22 @@ class VRYWorkerThread(QThread):
             table_data = []
             metadata = {"state": self.game_state, "mode": gamemode}
             
-            if self.game_state == "INGAME":
-                table_data, metadata = self.process_ingame_state_streaming(presence)
-            elif self.game_state == "PREGAME":
-                table_data, metadata = self.process_pregame_state_streaming(presence)
-                if metadata.get("starting_side"):
-                    status_extra = f"{gamemode} • {metadata['starting_side']}"
-            elif self.game_state == "MENUS":
-                table_data, metadata = self.process_menu_state_streaming(presence)
+            try:
+                if self.game_state == "INGAME":
+                    table_data, metadata = self.process_ingame_state_streaming(presence)
+                elif self.game_state == "PREGAME":
+                    table_data, metadata = self.process_pregame_state_streaming(presence)
+                    if metadata.get("starting_side"):
+                        status_extra = f"{gamemode} • {metadata['starting_side']}"
+                elif self.game_state == "MENUS":
+                    table_data, metadata = self.process_menu_state_streaming(presence)
+            except Exception as e:
+                self.error_signal.emit(f"Error processing {self.game_state} state: {str(e)}")
+                if self.verbose_level > 1:
+                    self.log(traceback.format_exc())
+                # Return empty data but don't break the entire process
+                table_data = []
+                metadata = {"state": self.game_state, "error": str(e)}
             
             self.status_signal.emit(self.game_state, status_extra)
             
@@ -389,6 +396,7 @@ class VRYWorkerThread(QThread):
                 self.error_signal.emit(f"State processing error: {str(e)}")
             if self.verbose_level > 1:
                 self.log(traceback.format_exc())
+
     
     def format_rank_with_act(self, rank_text, act, episode):
         if not rank_text or rank_text == "Unranked":
@@ -464,6 +472,12 @@ class VRYWorkerThread(QThread):
                     else:
                         party_icon = partyIcons[party]
             
+            # FIX: Safe agent lookup with fallback
+            character_id = player["CharacterID"].lower()
+            agent_name = self.agent_dict.get(character_id, "None")
+            if agent_name == "None":
+                self.log(f"Unknown agent ID: {character_id}")
+            
             playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
             previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
             
@@ -471,7 +485,7 @@ class VRYWorkerThread(QThread):
             
             row_data = {
                 "party": party_icon,
-                "agent": self.agent_dict.get(player["CharacterID"].lower(), ""),
+                "agent": agent_name,  # Use the safe lookup
                 "name": names[player["Subject"]],
                 "incognito": player["PlayerIdentity"]["Incognito"],
                 "team": player["TeamID"],
@@ -505,10 +519,11 @@ class VRYWorkerThread(QThread):
             
             table_data.append(row_data)
             
+            # FIX: Also fix the stats saving part
             self.stats.save_data({
                 player["Subject"]: {
                     "name": names[player["Subject"]],
-                    "agent": self.agent_dict[player["CharacterID"].lower()],
+                    "agent": agent_name,  # Use the safe lookup here too
                     "map": self.current_map,
                     "rank": playerRank["rank"],
                     "rr": playerRank["rr"],
@@ -563,6 +578,12 @@ class VRYWorkerThread(QThread):
                     else:
                         party_icon = partyIcons[party]
             
+            # FIX: Safe agent lookup with fallback
+            character_id = player["CharacterID"].lower()
+            agent_name = self.agent_dict.get(character_id, "None")
+            if agent_name == "None":
+                self.log(f"Unknown agent ID: {character_id}")
+            
             playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
             previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
             ppstats = self.pstats.get_stats(player["Subject"])
@@ -571,7 +592,7 @@ class VRYWorkerThread(QThread):
 
             row_data = {
                 "party": party_icon,
-                "agent": self.agent_dict.get(player["CharacterID"].lower(), ""),
+                "agent": agent_name,  # Use the safe lookup
                 "agent_state": player["CharacterSelectionState"],
                 "name": names[player["Subject"]],
                 "incognito": player["PlayerIdentity"]["Incognito"],
