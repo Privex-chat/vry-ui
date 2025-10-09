@@ -53,7 +53,6 @@ jobs:
             --assume-yes-for-downloads ^
             --follow-imports ^
             --enable-plugin=pyside6 ^
-            --include-data-file=config.json=./config.json ^
             --include-package=src ^
             --include-package=asyncio ^
             --include-package=websockets ^
