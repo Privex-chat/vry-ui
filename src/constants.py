@@ -6,7 +6,6 @@ enablePrivateLogging = True
 hide_names = True
 hide_levels = True
 
-
 gamemodes = {
     "newmap": "New Map",
     "competitive": "Competitive",
@@ -49,8 +48,6 @@ sockets = {
     "skin_buddy_level": "dd3bf334-87f3-40bd-b043-682a57a8dc3a"
 }
 
-
-
 AGENTCOLORLIST = {
     "none": (100, 100, 100),
     "astra": (113, 42, 232),
@@ -92,7 +89,6 @@ PARTYICONLIST = [
             color(symbol, fore=(212, 82, 207)),
             symbol
         ]
-
 
 NUMBERTORANKS = [
             color('UnR', fore=(46, 46, 46)),
@@ -181,10 +177,11 @@ DEFAULT_CONFIG = {
             "peak_rank_act": True,
             "discord_rpc": True,
             "aggregate_rank_rr": True,
-            "server_id": False
+            "server_id": False,
+            "show_resource_warning": False
         }
     }
-# Add Theme class to constants.py
+
 class Theme:
     def __init__(self, name, background, text, border, alternate, selection, header):
         self.name = name
@@ -195,7 +192,6 @@ class Theme:
         self.selection = selection
         self.header = header
 
-# Define themes
 THEMES = {
     "dark": Theme(
         "dark", 

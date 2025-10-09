@@ -1,6 +1,6 @@
 # VRY - UI v2
 
-A modern PyQt5-based interface for VALORANT Rank Yoinker, providing real-time player statistics and match information directly from VALORANT's game client.
+A modern PySide6-based interface for VALORANT Rank Yoinker, providing real-time player statistics and match information directly from VALORANT's game client.
 
 ## Features
 
@@ -25,25 +25,22 @@ A modern PyQt5-based interface for VALORANT Rank Yoinker, providing real-time pl
 - Customizable table columns and display options
 - Real-time status updates
 - Console output with adjustable verbosity levels
-- Incognito player privacy settings
 
 ### Web Integration
 - Built-in Match Loadouts viewer
 - VTL.lol player lookup integration
-- WebSocket server for external applications
 - Local web server for mobile access
 
 ### Additional Features
 - Discord Rich Presence integration
 - Automatic VALORANT client detection
-- Configurable refresh rates and display options
 - Export and logging capabilities
 
 ## Requirements
 
 - Windows operating system
 - VALORANT installed and running
-- PyQt5 and PyQtWebEngine (if running from source)
+- PySide6 and PySide6-addons (if running from source)
 
 ## Installation
 
@@ -56,7 +53,7 @@ Run with `--config` flag for first-time setup or to modify settings. Configurati
 ## Usage
 
 1. Launch VALORANT
-2. Run VRY - UI v2
+2. Run VRY - UI v2.xx
 3. The application will automatically detect your game state and display relevant player information
 4. Switch between tabs for different views and features
 5. Access settings through the menu bar for customization

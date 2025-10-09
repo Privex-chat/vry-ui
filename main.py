@@ -1,7 +1,6 @@
 """
-VRY - UI v2 (PyQt6 Version)
-Complete refactored version with performance optimizations
-Migrated to PyQt6 for improved WebEngine performance
+VRY - UI v2.13
+updated with starting_side, faster player display, and freeze functionality
 """
 
 import asyncio
@@ -25,37 +24,34 @@ from colr import color as colr
 from InquirerPy import inquirer
 
 try:
-    from PyQt6.QtCore import (Qt, QUrl, pyqtSignal, QThread, QTimer, 
-                             QSettings, QObject, QDateTime)
-    from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, 
-                                QVBoxLayout, QHBoxLayout, QStackedWidget,
-                                QPushButton, QTextEdit, QLabel, QTabWidget,
-                                QSplitter, QStatusBar, QMenuBar,
-                                QGroupBox, QGridLayout, QCheckBox, QMessageBox, 
-                                QLineEdit, QTableWidget, QTableWidgetItem,
-                                QHeaderView, QComboBox, QColorDialog, QDialog,
-                                QDialogButtonBox, QSpinBox)
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineProfile
-    from PyQt6.QtWebChannel import QWebChannel
-    from PyQt6.QtGui import QFont, QIcon, QTextCursor, QPalette, QColor, QKeySequence, QAction
-    USING_QT6 = True
-except ImportError:
-    print("Please install PyQt6 and PyQt6-WebEngine:")
-    print("pip install PyQt6 PyQt6-WebEngine")
+    from PySide6.QtCore import (Qt, QUrl, Signal, QThread, QTimer, 
+                                QSettings, QObject, QDateTime)
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, 
+                                  QVBoxLayout, QHBoxLayout, QStackedWidget,
+                                  QPushButton, QTextEdit, QLabel, QTabWidget,
+                                  QSplitter, QStatusBar, QMenuBar,
+                                  QGroupBox, QGridLayout, QCheckBox, QMessageBox, 
+                                  QLineEdit, QTableWidget, QTableWidgetItem,
+                                  QHeaderView, QComboBox, QColorDialog, QDialog,
+                                  QDialogButtonBox, QSpinBox)
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWebChannel import QWebChannel
+    from PySide6.QtGui import QFont, QIcon, QTextCursor, QPalette, QColor, QKeySequence, QAction
+    USING_PYSIDE6 = True
+except ImportError as e:
+    print("Please install PySide6-Essentials:")
+    print("pip install PySide6-Essentials")
+    print(f"Error getting system info: {e}")
     sys.exit(1)
 
-# Try to import psutil for resource monitoring
 try:
     import psutil
     import platform
     PSUTIL_AVAILABLE = True
 except ImportError:
-    print("Note: psutil not installed. Resource monitoring disabled.")
-    print("Install with: pip install psutil")
     PSUTIL_AVAILABLE = False
 
-# Import performance optimized WebView components
 try:
     from src.webview import MatchLoadoutsContainer
     OPTIMIZED_WEBVIEW_AVAILABLE = True
@@ -63,7 +59,6 @@ except ImportError:
     print("Warning: webview.py not found. Using standard WebView.")
     OPTIMIZED_WEBVIEW_AVAILABLE = False
 
-# og vry imports
 from src.colors import Colors
 from src.config import Config
 from src.configurator import configure
@@ -168,87 +163,13 @@ THEMES = {
 }
 
 
-class SystemResourceMonitor:
-    """Monitor system resources and auto-enable performance modes"""
-    
-    @staticmethod
-    def get_system_info():
-        """Get current system resource information"""
-        if not PSUTIL_AVAILABLE:
-            return None
-            
-        try:
-            # Get CPU info
-            cpu_count = psutil.cpu_count(logical=False)
-            cpu_freq = psutil.cpu_freq().current if psutil.cpu_freq() else 0
-            cpu_percent = psutil.cpu_percent(interval=1)
-            
-            # Get memory info
-            memory = psutil.virtual_memory()
-            total_ram_gb = memory.total / (1024**3)
-            available_ram_gb = memory.available / (1024**3)
-            memory_percent = memory.percent
-            
-            # Get system info
-            system_info = {
-                'platform': platform.system() if platform else "Unknown",
-                'cpu_cores': cpu_count,
-                'cpu_freq_mhz': cpu_freq,
-                'cpu_usage_percent': cpu_percent,
-                'total_ram_gb': round(total_ram_gb, 2),
-                'available_ram_gb': round(available_ram_gb, 2),
-                'ram_usage_percent': memory_percent
-            }
-            
-            return system_info
-        except Exception as e:
-            print(f"Error getting system info: {e}")
-            return None
-    
-    @staticmethod
-    def should_enable_performance_mode(system_info=None):
-        """Determine if performance mode should be enabled based on system specs"""
-        if not system_info:
-            system_info = SystemResourceMonitor.get_system_info()
-            
-        if not system_info:
-            return False, "Could not determine system specifications"
-        
-        reasons = []
-        
-        # Check CPU cores (less than 4 physical cores = low-end)
-        if system_info['cpu_cores'] and system_info['cpu_cores'] < 4:
-            reasons.append(f"Low CPU core count ({system_info['cpu_cores']} cores)")
-        
-        # Check RAM (less than 8GB = low-end)
-        if system_info['total_ram_gb'] < 8:
-            reasons.append(f"Low RAM ({system_info['total_ram_gb']}GB)")
-        
-        # Check available RAM (less than 2GB available = enable performance mode)
-        if system_info['available_ram_gb'] < 2:
-            reasons.append(f"Low available RAM ({system_info['available_ram_gb']}GB)")
-        
-        # Check current CPU usage (over 80% = system under load)
-        if system_info['cpu_usage_percent'] > 80:
-            reasons.append(f"High CPU usage ({system_info['cpu_usage_percent']}%)")
-        
-        # Check current RAM usage (over 85% = system under memory pressure)
-        if system_info['ram_usage_percent'] > 85:
-            reasons.append(f"High RAM usage ({system_info['ram_usage_percent']}%)")
-        
-        if reasons:
-            return True, " | ".join(reasons)
-        
-        return False, "System resources adequate"
-
-
 class VRYWorkerThread(QThread):
-    """Worker thread for VRY background operations"""
     
-    output_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
-    table_update_signal = pyqtSignal(list, dict)  # rows, metadata
-    status_signal = pyqtSignal(str, str)  # state, extra_info
+    output_signal = Signal(str)
+    error_signal = Signal(str)
+    table_update_signal = Signal(list, dict)
+    table_row_signal = Signal(dict, dict)
+    status_signal = Signal(str, str)
     
     def __init__(self, verbose_level=0):
         super().__init__()
@@ -257,9 +178,13 @@ class VRYWorkerThread(QThread):
         self.game_state = None
         self.firstTime = True
         self.verbose_level = verbose_level
+        self.loop = None
+        self.freeze_table = False  # New freeze state
+        
+    def set_freeze_state(self, frozen):
+        self.freeze_table = frozen
         
     def initialize_vry(self):
-        """Initialize VRY components"""
         try:
             self.Logging = Logging()
             self.log = self.Logging.log
@@ -332,12 +257,10 @@ class VRYWorkerThread(QThread):
                 self.log(traceback.format_exc())
     
     def log(self, message):
-        """Log message based on verbosity level"""
         if self.verbose_level > 1:
             self.output_signal.emit(f"[DEBUG] {message}")
             
     def get_ip(self):
-        """Get local IP address"""
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0)
         try:
@@ -350,45 +273,55 @@ class VRYWorkerThread(QThread):
         return IP
     
     def run(self):
-        """Main worker loop"""
         self.running = True
         
-        if not self.initialized:
-            self.initialize_vry()
-            
-        if not self.initialized:
-            self.error_signal.emit("Failed to initialize VRY")
-            return
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         
-        while self.running:
-            try:
-                self.process_game_state()
-                for _ in range(20):
-                    if not self.running:
-                        break
-                    self.msleep(100)
-            except Exception as e:
-                if self.verbose_level > 0:
-                    self.error_signal.emit(f"Processing error: {str(e)}")
-                if self.verbose_level > 1:
-                    self.log(traceback.format_exc())
-                for _ in range(50):
-                    if not self.running:
-                        break
-                    self.msleep(100)
+        try:
+            if not self.initialized:
+                self.initialize_vry()
+                
+            if not self.initialized:
+                self.error_signal.emit("Failed to initialize VRY")
+                return
+            
+            while self.running:
+                try:
+                    self.process_game_state()
+                    for _ in range(20):
+                        if not self.running:
+                            break
+                        self.msleep(100)
+                except Exception as e:
+                    if self.verbose_level > 0:
+                        self.error_signal.emit(f"Processing error: {str(e)}")
+                    if self.verbose_level > 1:
+                        self.log(traceback.format_exc())
+                    for _ in range(50):
+                        if not self.running:
+                            break
+                        self.msleep(100)
+        finally:
+            if self.loop:
+                try:
+                    self.loop.close()
+                except Exception:
+                    pass
     
     def process_game_state(self):
-        """Process current game state"""
         try:
             if self.firstTime:
                 run = True
                 while run and self.running:
                     presence = self.presences.get_presence()
-                    if self.presences.get_private_presence(presence) is not None:
+                    private_presence = self.presences.get_private_presence(presence)
+                    # wait until your own valorant presence is initialized
+                    if private_presence is not None:
                         if self.cfg.get_feature_flag("discord_rpc"):
-                            self.rpc.set_rpc(self.presences.get_private_presence(presence))
-                        self.game_state = self.presences.get_game_state(presence)
-                        if self.game_state is not None:
+                            self.rpc.set_rpc(private_presence)
+                        game_state = self.presences.get_game_state(presence)
+                        if game_state is not None:
                             run = False
                     for _ in range(20):
                         if not self.running:
@@ -397,21 +330,31 @@ class VRYWorkerThread(QThread):
                 self.log(f"first game state: {self.game_state}")
                 self.firstTime = False
             else:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 previous_game_state = self.game_state
-                self.game_state = loop.run_until_complete(
-                    self.Wss.recconect_to_websocket(self.game_state)
-                )
+                
+                if self.loop and not self.loop.is_closed():
+                    self.game_state = self.loop.run_until_complete(
+                        self.Wss.recconect_to_websocket(self.game_state)
+                    )
+                else:
+                    self.loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self.loop)
+                    self.game_state = self.loop.run_until_complete(
+                        self.Wss.recconect_to_websocket(self.game_state)
+                    )
+                
                 if previous_game_state != self.game_state and self.game_state == "MENUS":
                     self.rank.invalidate_cached_responses()
                 self.log(f"new game state: {self.game_state}")
-                loop.close()
+            
+            # dont process if table is frozen
+            if self.freeze_table:
+                return
             
             presence = self.presences.get_presence()
             priv_presence = self.presences.get_private_presence(presence)
             
-            if priv_presence["provisioningFlow"] == "CustomGame" or priv_presence["partyState"] == "CUSTOM_GAME_SETUP":
+            if priv_presence["provisioningFlow"] == "CustomGame" or priv_presence["partyPresenceData"]["partyState"] == "CUSTOM_GAME_SETUP":
                 gamemode = "Custom Game"
             else:
                 gamemode = gamemodes.get(priv_presence["queueId"])
@@ -421,17 +364,22 @@ class VRYWorkerThread(QThread):
                 "PREGAME": "Agent Select",
                 "MENUS": "In-Menus"
             }
-            self.status_signal.emit(self.game_state, gamemode)
+            
+            status_extra = gamemode
             
             table_data = []
             metadata = {"state": self.game_state, "mode": gamemode}
             
             if self.game_state == "INGAME":
-                table_data, metadata = self.process_ingame_state(presence)
+                table_data, metadata = self.process_ingame_state_streaming(presence)
             elif self.game_state == "PREGAME":
-                table_data, metadata = self.process_pregame_state(presence)
+                table_data, metadata = self.process_pregame_state_streaming(presence)
+                if metadata.get("starting_side"):
+                    status_extra = f"{gamemode} • {metadata['starting_side']}"
             elif self.game_state == "MENUS":
-                table_data, metadata = self.process_menu_state(presence)
+                table_data, metadata = self.process_menu_state_streaming(presence)
+            
+            self.status_signal.emit(self.game_state, status_extra)
             
             if table_data:
                 self.table_update_signal.emit(table_data, metadata)
@@ -443,21 +391,22 @@ class VRYWorkerThread(QThread):
                 self.log(traceback.format_exc())
     
     def format_rank_with_act(self, rank_text, act, episode):
-        """Format rank text with act and episode"""
         if not rank_text or rank_text == "Unranked":
             return rank_text
         if act and episode:
             return f"{rank_text} ({episode}A{act})"
         return rank_text
     
-    def process_ingame_state(self, presence):
-        """Process in-game state data"""
+    def process_ingame_state_streaming(self, presence):
         table_data = []
         metadata = {"state": "INGAME"}
         
         coregame_stats = self.coregame.get_coregame_stats()
         if not coregame_stats:
             return table_data, metadata
+        
+        metadata["clear_table"] = True
+        self.table_update_signal.emit([], metadata)
         
         Players = coregame_stats["Players"]
         partyMembers = self.menu.get_party_members(self.Requests.puuid, presence)
@@ -502,6 +451,9 @@ class VRYWorkerThread(QThread):
                 break
         
         for player in Players:
+            if not self.running or self.freeze_table:
+                break
+                
             party_icon = ""
             for party in partyOBJ:
                 if player["Subject"] in partyOBJ[party]:
@@ -547,6 +499,10 @@ class VRYWorkerThread(QThread):
                 "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
+            
+            if not self.freeze_table:
+                self.table_row_signal.emit(row_data, metadata)
+            
             table_data.append(row_data)
             
             self.stats.save_data({
@@ -563,14 +519,22 @@ class VRYWorkerThread(QThread):
         
         return table_data, metadata
     
-    def process_pregame_state(self, presence):
-        """Process pre-game state data"""
+    def process_pregame_state_streaming(self, presence):
         table_data = []
         metadata = {"state": "PREGAME"}
         
         pregame_stats = self.pregame.get_pregame_stats()
         if not pregame_stats:
             return table_data, metadata
+        
+        if self.cfg.get_feature_flag("starting_side") and pregame_stats:
+            team_id = pregame_stats.get("AllyTeam", {}).get("TeamID")
+            if team_id:
+                starting_side = "Attacker" if team_id == "Red" else "Defender"
+                metadata["starting_side"] = starting_side
+        
+        metadata["clear_table"] = True
+        self.table_update_signal.emit([], metadata)
         
         Players = pregame_stats["AllyTeam"]["Players"]
         self.presences.wait_for_presence(self.namesClass.get_players_puuid(Players))
@@ -586,6 +550,9 @@ class VRYWorkerThread(QThread):
         partyCount = 0
         
         for player in Players:
+            if not self.running or self.freeze_table:
+                break
+                
             party_icon = ""
             for party in partyOBJ:
                 if player["Subject"] in partyOBJ[party]:
@@ -632,14 +599,20 @@ class VRYWorkerThread(QThread):
                 "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
+            
+            if not self.freeze_table:
+                self.table_row_signal.emit(row_data, metadata)
+            
             table_data.append(row_data)
         
         return table_data, metadata
     
-    def process_menu_state(self, presence):
-        """Process menu state data"""
+    def process_menu_state_streaming(self, presence):
         table_data = []
         metadata = {"state": "MENUS"}
+        
+        metadata["clear_table"] = True
+        self.table_update_signal.emit([], metadata)
         
         Players = self.menu.get_party_members(self.Requests.puuid, presence)
         names = self.namesClass.get_names_from_puuids(Players)
@@ -648,7 +621,7 @@ class VRYWorkerThread(QThread):
         
         seen = []
         for player in Players:
-            if player["Subject"] not in seen:
+            if player["Subject"] not in seen and not self.freeze_table:
                 playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
                 previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
                 ppstats = self.pstats.get_stats(player["Subject"])
@@ -681,14 +654,28 @@ class VRYWorkerThread(QThread):
                     "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                     "afk_penalty": ppstats.get("AFKPenalty", "N/A")
                 }
+                
+                if not self.freeze_table:
+                    self.table_row_signal.emit(row_data, metadata)
+                
                 table_data.append(row_data)
                 seen.append(player["Subject"])
         
         return table_data, metadata
     
     def stop(self):
-        """Stop the worker thread"""
         self.running = False
+        
+        if self.loop and not self.loop.is_closed():
+            try:
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                self.loop.stop()
+                self.loop.close()
+            except Exception:
+                pass
+        
         try:
             if hasattr(self, "Wss") and self.Wss:
                 self.Wss.close()
@@ -707,15 +694,15 @@ class VRYWorkerThread(QThread):
 
 
 class VRYTableWidget(QTableWidget):
-    """Custom table widget for player display"""
     
     def __init__(self):
         super().__init__()
         self.current_theme = THEMES["Dark"]
+        self.frozen_data = []
+        self.is_frozen = False
         self.setup_table()
         
     def setup_table(self):
-        """Set up table appearance and columns"""
         self.setColumnCount(14)
         headers = ["Party", "Agent", "Name", "Skin", "Rank", "RR", 
                   "Peak", "Previous", "Pos.", "HS%", "WR%", "K/D", "Level", "ΔRR"]
@@ -732,20 +719,20 @@ class VRYTableWidget(QTableWidget):
         for col in stretch_columns:
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
 
-        self.setColumnWidth(0, 50)   # Party
-        self.setColumnWidth(1, 80)   # Agent
-        self.setColumnWidth(2, 140)  # Name
-        self.setColumnWidth(3, 140)  # Skin
-        self.setColumnWidth(4, 120)  # Rank
-        self.setColumnWidth(5, 45)   # RR
-        self.setColumnWidth(6, 120)  # Peak
-        self.setColumnWidth(7, 120)  # Previous
-        self.setColumnWidth(8, 45)   # Pos
-        self.setColumnWidth(9, 55)   # HS%
-        self.setColumnWidth(10, 75)  # WR%
-        self.setColumnWidth(11, 55)  # K/D
-        self.setColumnWidth(12, 55)  # Level
-        self.setColumnWidth(13, 60)  # ΔRR
+        self.setColumnWidth(0, 50)
+        self.setColumnWidth(1, 80)
+        self.setColumnWidth(2, 140)
+        self.setColumnWidth(3, 140)
+        self.setColumnWidth(4, 120)
+        self.setColumnWidth(5, 45)
+        self.setColumnWidth(6, 120)
+        self.setColumnWidth(7, 120)
+        self.setColumnWidth(8, 45)
+        self.setColumnWidth(9, 55)
+        self.setColumnWidth(10, 75)
+        self.setColumnWidth(11, 55)
+        self.setColumnWidth(12, 55)
+        self.setColumnWidth(13, 60)
         
         self.setSortingEnabled(True)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -753,7 +740,6 @@ class VRYTableWidget(QTableWidget):
         self.apply_theme(self.current_theme)
 
     def apply_theme(self, theme):
-        """Apply theme to table"""
         self.current_theme = theme
         self.setStyleSheet(f"""
             QTableWidget {{
@@ -793,17 +779,16 @@ class VRYTableWidget(QTableWidget):
         """)
     
     def resizeEvent(self, event):
-        """Handle resize events"""
         super().resizeEvent(event)
 
         total_width = self.viewport().width()
         weights = {
-            2: 3,  # Name
-            3: 2,  # Skin
-            4: 2,  # Rank
-            6: 2,  # Peak
-            7: 2,  # Previous
-            10: 1  # WR%
+            2: 3,
+            3: 2,
+            4: 2,
+            6: 2,
+            7: 2,
+            10: 1
         }
 
         total_weight = sum(weights.values())
@@ -818,10 +803,48 @@ class VRYTableWidget(QTableWidget):
             if self.columnWidth(col) < 40:
                 self.setColumnWidth(col, 40)
 
+    def freeze_table(self, freeze):
+        self.is_frozen = freeze
+        if freeze:
+            self.frozen_data = []
+            for row in range(self.rowCount()):
+                row_data = []
+                for col in range(self.columnCount()):
+                    item = self.item(row, col)
+                    if item:
+                        row_data.append((item.text(), item.foreground()))
+                    else:
+                        row_data.append((None, None))
+                self.frozen_data.append(row_data)
+        else:
+            self.frozen_data = []
+    
+    def add_row_streaming(self, row_data, metadata):
+        if self.is_frozen:
+            return
+            
+        if metadata.get("clear_table"):
+            self.setRowCount(0)
+            
+        row_position = self.rowCount()
+        self.insertRow(row_position)
+        self._populate_row(row_position, row_data, metadata)
+        
     def update_table(self, data, metadata):
-        """Update table with new data"""
+        if self.is_frozen:
+            return
+            
         self.setRowCount(0)
-
+        
+        for row_data in data:
+            row_position = self.rowCount()
+            self.insertRow(row_position)
+            self._populate_row(row_position, row_data, metadata)
+        
+        self.resizeColumnsToContents()
+        self._update_column_visibility(metadata)
+    
+    def _populate_row(self, row_position, row_data, metadata):
         def safe_float(value, default=0.0):
             try:
                 return float(value)
@@ -835,7 +858,6 @@ class VRYTableWidget(QTableWidget):
                 return default
 
         def parse_and_create_item(raw):
-            """Return (QTableWidgetItem, had_ansi_color_bool)."""
             if raw is None:
                 raw = ""
             raw_text = str(raw)
@@ -861,166 +883,159 @@ class VRYTableWidget(QTableWidget):
 
         privacy_enabled = bool(metadata.get('incognito_privacy', True))
 
-        for row_data in data:
-            row_position = self.rowCount()
-            self.insertRow(row_position)
+        # column 0: party
+        party_item, _ = parse_and_create_item(row_data.get("party", ""))
+        party_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 0, party_item)
 
-            # Party icon
-            party_item, _ = parse_and_create_item(row_data.get("party", ""))
-            party_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 0, party_item)
+        # column 1: agent
+        agent_item, agent_colored = parse_and_create_item(row_data.get("agent", ""))
+        if not agent_colored and "agent_state" in row_data:
+            if row_data["agent_state"] == "locked":
+                agent_item.setForeground(QColor(255, 255, 255))
+            elif row_data["agent_state"] == "selected":
+                agent_item.setForeground(QColor(128, 128, 128))
+            else:
+                agent_item.setForeground(QColor(54, 53, 51))
+        agent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 1, agent_item)
 
-            # Agent
-            agent_item, agent_colored = parse_and_create_item(row_data.get("agent", ""))
-            if not agent_colored and "agent_state" in row_data:
-                if row_data["agent_state"] == "locked":
-                    agent_item.setForeground(QColor(255, 255, 255))
-                elif row_data["agent_state"] == "selected":
-                    agent_item.setForeground(QColor(128, 128, 128))
+        # column 2: name
+        name_raw = row_data.get("name", "")
+        incog_flag = bool(row_data.get("incognito", False))
+        is_self = bool(row_data.get("is_self", False))
+        is_party = bool(row_data.get("is_party", False))
+
+        if incog_flag and privacy_enabled and not is_self and not is_party:
+            name_item = QTableWidgetItem("Incognito")
+            font = QFont()
+            font.setBold(True)
+            name_item.setFont(font)
+            name_item.setForeground(QColor(128, 0, 0))
+            skip_team_coloring = True
+        else:
+            display_name = ("*" + str(name_raw)) if (incog_flag and not privacy_enabled) else str(name_raw)
+            name_item, name_colored = parse_and_create_item(display_name)
+            skip_team_coloring = False
+
+        if not skip_team_coloring and not name_colored:
+            if is_self:
+                name_item.setForeground(QColor(255, 215, 0))
+            elif is_party:
+                name_item.setForeground(QColor(76, 151, 237))
+            elif "team" in row_data and "ally_team" in row_data:
+                if row_data["team"] == row_data.get("ally_team"):
+                    name_item.setForeground(QColor(0, 255, 127))
                 else:
-                    agent_item.setForeground(QColor(54, 53, 51))
-            agent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 1, agent_item)
+                    name_item.setForeground(QColor(255, 69, 0))
 
-            # Name
-            name_raw = row_data.get("name", "")
-            incog_flag = bool(row_data.get("incognito", False))
-            is_self = bool(row_data.get("is_self", False))
-            is_party = bool(row_data.get("is_party", False))
+        self.setItem(row_position, 2, name_item)
 
-            if incog_flag and privacy_enabled and not is_self and not is_party:
-                name_item = QTableWidgetItem("Incognito")
-                font = QFont()
-                font.setBold(True)
-                name_item.setFont(font)
-                name_item.setForeground(QColor(128, 0, 0))  # maroon
-                skip_team_coloring = True
-            else:
-                display_name = ("*" + str(name_raw)) if (incog_flag and not privacy_enabled) else str(name_raw)
-                name_item, name_colored = parse_and_create_item(display_name)
-                skip_team_coloring = False
+        # remaining columns
+        skin_item, _ = parse_and_create_item(row_data.get("skin", ""))
+        self.setItem(row_position, 3, skin_item)
 
-            if not skip_team_coloring and not name_colored:
-                if is_self:
-                    name_item.setForeground(QColor(255, 215, 0))  # Gold for self
-                elif is_party:
-                    name_item.setForeground(QColor(76, 151, 237))  # Blue for party
-                elif "team" in row_data and "ally_team" in row_data:
-                    if row_data["team"] == row_data.get("ally_team"):
-                        name_item.setForeground(QColor(0, 255, 127))  # Green for allies
-                    else:
-                        name_item.setForeground(QColor(255, 69, 0))  # Red for enemies
+        rank_text = format_rank_with_episode(
+            row_data.get("rank", ""),
+            row_data.get("rank_act"),
+            row_data.get("rank_ep")
+        )
+        rank_item, _ = parse_and_create_item(rank_text)
+        self.setItem(row_position, 4, rank_item)
 
-            self.setItem(row_position, 2, name_item)
+        rr_val = safe_int(row_data.get("rr", 0))
+        rr_item = QTableWidgetItem(str(rr_val))
+        rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 5, rr_item)
 
-            # Skin
-            skin_item, _ = parse_and_create_item(row_data.get("skin", ""))
-            self.setItem(row_position, 3, skin_item)
+        peak_text = format_rank_with_episode(
+            row_data.get("peak_rank", ""),
+            row_data.get("peak_act"),
+            row_data.get("peak_ep")
+        )
+        peak_item, _ = parse_and_create_item(peak_text)
+        self.setItem(row_position, 6, peak_item)
 
-            # Rank
-            rank_text = format_rank_with_episode(
-                row_data.get("rank", ""),
-                row_data.get("rank_act"),
-                row_data.get("rank_ep")
-            )
-            rank_item, _ = parse_and_create_item(rank_text)
-            self.setItem(row_position, 4, rank_item)
+        prev_text = format_rank_with_episode(
+            row_data.get("previous_rank", ""),
+            row_data.get("previous_act"),
+            row_data.get("previous_ep")
+        )
+        prev_item, _ = parse_and_create_item(prev_text)
+        self.setItem(row_position, 7, prev_item)
 
-            # RR
-            rr_val = safe_int(row_data.get("rr", 0))
-            rr_item = QTableWidgetItem(str(rr_val))
-            rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 5, rr_item)
+        lb_val = safe_int(row_data.get("leaderboard", 0))
+        lb_item = QTableWidgetItem(str(lb_val) if lb_val > 0 else "")
+        lb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 8, lb_item)
 
-            # Peak
-            peak_text = format_rank_with_episode(
-                row_data.get("peak_rank", ""),
-                row_data.get("peak_act"),
-                row_data.get("peak_ep")
-            )
-            peak_item, _ = parse_and_create_item(peak_text)
-            self.setItem(row_position, 6, peak_item)
+        hs_val = row_data.get("hs", "N/A")
+        if hs_val != "N/A":
+            hs_display = f"{safe_float(hs_val):.1f}%"
+        else:
+            hs_display = "N/A"
+        hs_item = QTableWidgetItem(hs_display)
+        hs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 9, hs_item)
 
-            # Previous
-            prev_text = format_rank_with_episode(
-                row_data.get("previous_rank", ""),
-                row_data.get("previous_act"),
-                row_data.get("previous_ep")
-            )
-            prev_item, _ = parse_and_create_item(prev_text)
-            self.setItem(row_position, 7, prev_item)
+        wr_val = row_data.get("wr", "N/a")
+        games_val = safe_int(row_data.get("games", 0))
+        if wr_val != "N/a":
+            wr_display = f"{safe_int(wr_val)}% ({games_val})"
+        else:
+            wr_display = f"N/A ({games_val})"
+        wr_item = QTableWidgetItem(wr_display)
+        wr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 10, wr_item)
 
-            # Leaderboard position
-            lb_val = safe_int(row_data.get("leaderboard", 0))
-            lb_item = QTableWidgetItem(str(lb_val) if lb_val > 0 else "")
-            lb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 8, lb_item)
+        kd_val = row_data.get("kd", "N/A")
+        if kd_val != "N/A":
+            kd_display = f"{safe_float(kd_val):.2f}"
+        else:
+            kd_display = "N/A"
+        kd_item = QTableWidgetItem(kd_display)
+        kd_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 11, kd_item)
 
-            # Headshot %
-            hs_val = row_data.get("hs", "N/A")
-            if hs_val != "N/A":
-                hs_display = f"{safe_float(hs_val):.1f}%"
-            else:
-                hs_display = "N/A"
-            hs_item = QTableWidgetItem(hs_display)
-            hs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 9, hs_item)
-
-            # Win rate
-            wr_val = row_data.get("wr", "N/a")
-            games_val = safe_int(row_data.get("games", 0))
-            if wr_val != "N/a":
-                wr_display = f"{safe_int(wr_val)}% ({games_val})"
-            else:
-                wr_display = f"N/A ({games_val})"
-            wr_item = QTableWidgetItem(wr_display)
-            wr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 10, wr_item)
-
-            # K/D
-            kd_val = row_data.get("kd", "N/A")
-            if kd_val != "N/A":
-                kd_display = f"{safe_float(kd_val):.2f}"
-            else:
-                kd_display = "N/A"
-            kd_item = QTableWidgetItem(kd_display)
-            kd_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 11, kd_item)
-
-            # Level
-            level_val = row_data.get("level", "")
-            if row_data.get("hide_level") and not is_self and not is_party:
-                level_val = ""
-            level_item = QTableWidgetItem(str(level_val))
-            level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 12, level_item)
-
-            # Earned RR
-            earned_rr = row_data.get("earned_rr", "N/A")
-            afk_penalty = row_data.get("afk_penalty", "N/A")
-            
-            if earned_rr != "N/A" and afk_penalty != "N/A":
-                earned_display = f"{earned_rr:+d}"
-                if afk_penalty != 0:
-                    earned_display += f" ({afk_penalty})"
-                rr_item = QTableWidgetItem(earned_display)
-                if earned_rr > 0:
-                    rr_item.setForeground(QColor(0, 255, 0))
-                elif earned_rr < 0:
-                    rr_item.setForeground(QColor(255, 0, 0))
-            else:
-                rr_item = QTableWidgetItem("")
-            
-            rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setItem(row_position, 13, rr_item)
-
-        self.resizeColumnsToContents()
+        level_val = row_data.get("level", "")
+        # Only hide level if ALL conditions are met:
+        # 1. Player has level hiding enabled
+        # 2. Not current user
+        # 3. Not in party
+        # 4. Incognito privacy is ON
+        if (row_data.get("hide_level") and 
+            not is_self and 
+            not is_party and 
+            metadata.get('incognito_privacy', True)):
+            level_val = ""
+        level_item = QTableWidgetItem(str(level_val))
         
-        # Hide/show columns based on state
+        level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 12, level_item)
+
+        earned_rr = row_data.get("earned_rr", "N/A")
+        afk_penalty = row_data.get("afk_penalty", "N/A")
+        
+        if earned_rr != "N/A" and afk_penalty != "N/A":
+            earned_display = f"{earned_rr:+d}"
+            if afk_penalty != 0:
+                earned_display += f" ({afk_penalty})"
+            rr_item = QTableWidgetItem(earned_display)
+            if earned_rr > 0:
+                rr_item.setForeground(QColor(0, 255, 0))
+            elif earned_rr < 0:
+                rr_item.setForeground(QColor(255, 0, 0))
+        else:
+            rr_item = QTableWidgetItem("")
+        
+        rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 13, rr_item)
+    
+    def _update_column_visibility(self, metadata):
         if metadata.get("state") == "MENUS":
-            self.setColumnHidden(0, True)  # Party
-            self.setColumnHidden(1, True)  # Agent
-            self.setColumnHidden(3, True)  # Skin
+            self.setColumnHidden(0, True)
+            self.setColumnHidden(1, True)
+            self.setColumnHidden(3, True)
         else:
             self.setColumnHidden(0, False)
             self.setColumnHidden(1, False)
@@ -1028,7 +1043,6 @@ class VRYTableWidget(QTableWidget):
 
 
 class ThemeCustomizationDialog(QDialog):
-    """Dialog for customizing theme colors"""
     
     def __init__(self, parent=None, current_theme=None):
         super().__init__(parent)
@@ -1044,7 +1058,6 @@ class ThemeCustomizationDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout()
         
-        # Color customization grid
         color_grid = QGridLayout()
         
         self.color_buttons = {}
@@ -1071,7 +1084,6 @@ class ThemeCustomizationDialog(QDialog):
         
         layout.addLayout(color_grid)
         
-        # Dialog buttons
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
@@ -1080,7 +1092,6 @@ class ThemeCustomizationDialog(QDialog):
         self.setLayout(layout)
     
     def choose_color(self, property_name, button):
-        """Choose color for property"""
         current_color = QColor(getattr(self.custom_theme, property_name))
         color = QColorDialog.getColor(current_color, self, f"Choose {property_name} color")
         
@@ -1090,157 +1101,82 @@ class ThemeCustomizationDialog(QDialog):
             button.setStyleSheet(f"background-color: {hex_color}; border: 1px solid #000;")
     
     def get_custom_theme(self):
-        """Get the customized theme"""
         return self.custom_theme
 
 
 class VRYMainWindow(QMainWindow):
-    """Main application window"""
     
     def __init__(self):
         super().__init__()
         
-        # Settings
         self.settings = QSettings("VRY", "VRY - UI v2")
-        
-        # Current theme
         self.current_theme = THEMES["Dark"]
-        
-        # Worker thread
         self.worker_thread = None
-        
-        # Table data
         self.player_table_data = []
         self.player_table_metadata = {}
-        
-        # Web views
         self.matchloadouts_web = None
         self.vtl_web = None
         
-        # Performance monitoring
-        self.auto_performance_mode = False
-        self.auto_lightweight_mode = False
-        self.low_resource_warning_shown = False
+        self.config = Config(None)
+        self.show_resource_warning = self.config.get_feature_flag("show_resource_warning")
         
-        # Check system resources
-        self.check_and_apply_performance_settings()
-        
-        # Initialize UI
         self.init_ui()
-        
-        # Load settings
         self.load_settings()
         
-        # Set up resource monitoring
-        if PSUTIL_AVAILABLE:
+        if PSUTIL_AVAILABLE and self.show_resource_warning:
             self.resource_timer = QTimer()
             self.resource_timer.timeout.connect(self.monitor_resources)
-            self.resource_timer.start(30000)  # Check every 30 seconds
+            self.resource_timer.start(30000)
         
-        # Start VRY automatically
         QTimer.singleShot(100, self.start_vry)
     
-    def check_and_apply_performance_settings(self):
-        """Check system resources and apply appropriate settings"""
-        if not PSUTIL_AVAILABLE:
-            return
-            
-        system_info = SystemResourceMonitor.get_system_info()
-        
-        if system_info:
-            should_enable, reason = SystemResourceMonitor.should_enable_performance_mode(system_info)
-            
-            if should_enable:
-                print(f"Auto-enabling performance mode: {reason}")
-                self.auto_performance_mode = True
-                self.auto_lightweight_mode = (
-                    system_info['total_ram_gb'] < 4 or 
-                    system_info['available_ram_gb'] < 1
-                )
-            else:
-                print(f"System check: {reason}")
-                self.auto_performance_mode = False
-                self.auto_lightweight_mode = False
-                
-            print(f"System Info: {system_info['cpu_cores']} cores, "
-                  f"{system_info['total_ram_gb']}GB RAM, "
-                  f"{system_info['platform']} OS")
-    
     def monitor_resources(self):
-        """Periodically monitor resources and warn user if needed"""
-        if not PSUTIL_AVAILABLE:
+        if not PSUTIL_AVAILABLE or not self.show_resource_warning:
             return
             
         try:
             memory = psutil.virtual_memory()
             cpu_percent = psutil.cpu_percent(interval=0.1)
             
-            # Critical resource warning
             if memory.percent > 90 or cpu_percent > 95:
-                if not self.low_resource_warning_shown:
-                    self.show_resource_warning(memory.percent, cpu_percent)
-                    self.low_resource_warning_shown = True
-                    
-                    # Auto-enable performance mode if Match Loadouts is open
-                    if OPTIMIZED_WEBVIEW_AVAILABLE and self.matchloadouts_web:
-                        if hasattr(self.matchloadouts_web, 'perf_checkbox'):
-                            self.matchloadouts_web.perf_checkbox.setChecked(True)
-                            self.status_bar.showMessage(
-                                "Auto-enabled performance mode due to high resource usage", 
-                                5000
-                            )
-            else:
-                self.low_resource_warning_shown = False
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Icon.Warning)
+                msg.setWindowTitle("High Resource Usage")
+                msg.setText(
+                    f"System resources are running low:\n"
+                    f"Memory Usage: {memory.percent:.1f}%\n"
+                    f"CPU Usage: {cpu_percent:.1f}%"
+                )
+                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+                msg.exec()
                 
         except Exception as e:
             print(f"Resource monitoring error: {e}")
     
-    def show_resource_warning(self, mem_percent, cpu_percent):
-        """Show a warning when resources are critically low"""
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle("High Resource Usage Detected")
-        msg.setText(
-            f"System resources are running low:\n"
-            f"Memory Usage: {mem_percent:.1f}%\n"
-            f"CPU Usage: {cpu_percent:.1f}%\n\n"
-            f"Consider enabling Performance Mode or Lightweight View "
-            f"in the Match Loadouts tab to prevent crashes."
-        )
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.exec()
-    
     def init_ui(self):
-        """Initialize the user interface"""
-        self.setWindowTitle("VRY - UI v2 (PyQt6)")
+        self.setWindowTitle("VRY - UI v2.13")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
         
-        # Application font
         app_font = QFont("Segoe UI", 9)
         self.setFont(app_font)
         
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # Menu bar
         self.create_menu_bar()
         
-        # Tab widget
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         main_layout.addWidget(self.tabs)
         
-        # Main VRY tab
         vry_widget = QWidget()
         vry_layout = QVBoxLayout(vry_widget)
         vry_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Status panel
         status_panel = QWidget()
         status_layout = QHBoxLayout(status_panel)
         status_layout.setContentsMargins(0, 0, 0, 10)
@@ -1251,7 +1187,12 @@ class VRYMainWindow(QMainWindow):
         
         status_layout.addStretch()
         
-        # Refresh button
+        self.freeze_btn = QPushButton("❄ Freeze Table")
+        self.freeze_btn.setCheckable(True)
+        self.freeze_btn.setMaximumWidth(140)
+        self.freeze_btn.clicked.connect(self.toggle_freeze)
+        status_layout.addWidget(self.freeze_btn)
+        
         self.refresh_btn = QPushButton("↻ Refresh")
         self.refresh_btn.setMaximumWidth(100)
         self.refresh_btn.clicked.connect(self.refresh_data)
@@ -1259,13 +1200,11 @@ class VRYMainWindow(QMainWindow):
         
         vry_layout.addWidget(status_panel)
         
-        # Player table
         self.player_table = VRYTableWidget()
         vry_layout.addWidget(self.player_table)
         
         self.tabs.addTab(vry_widget, "Players")
         
-        # Console tab
         self.console_widget = QWidget()
         console_layout = QVBoxLayout(self.console_widget)
         
@@ -1274,19 +1213,35 @@ class VRYMainWindow(QMainWindow):
         self.console_output.setFont(QFont("Consolas", 9))
         console_layout.addWidget(self.console_output)
         
-        # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
         
-        # Apply theme
         self.apply_theme(self.current_theme)
     
+    def toggle_freeze(self, checked):
+        self.player_table.freeze_table(checked)
+        if self.worker_thread:
+            self.worker_thread.set_freeze_state(checked)
+        
+        if checked:
+            self.freeze_btn.setText("❄ Unfreeze Table")
+            self.freeze_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #4a90e2;
+                    color: white;
+                    font-weight: bold;
+                }}
+            """)
+            self.status_bar.showMessage("Table frozen - updates paused", 3000)
+        else:
+            self.freeze_btn.setText("❄ Freeze Table")
+            self.freeze_btn.setStyleSheet("")
+            self.status_bar.showMessage("Table unfrozen - updates resumed", 3000)
+    
     def create_menu_bar(self):
-        """Create application menu bar"""
         menubar = self.menuBar()
         
-        # File menu
         file_menu = menubar.addMenu('File')
         
         refresh_action = QAction('Refresh Data', self)
@@ -1301,10 +1256,8 @@ class VRYMainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # View menu
         view_menu = menubar.addMenu('View')
         
-        # Theme submenu
         theme_menu = view_menu.addMenu('Theme')
         
         self.theme_group = []
@@ -1323,7 +1276,6 @@ class VRYMainWindow(QMainWindow):
         
         view_menu.addSeparator()
         
-        # Tab toggles
         self.toggle_matchloadouts = QAction('Match Loadouts Tab', self)
         self.toggle_matchloadouts.setCheckable(True)
         self.toggle_matchloadouts.setChecked(True)
@@ -1342,7 +1294,6 @@ class VRYMainWindow(QMainWindow):
         
         view_menu.addSeparator()
         
-        # Settings submenu
         settings_menu = view_menu.addMenu('Settings')
         
         incognito_action = QAction('Incognito Privacy', self)
@@ -1354,7 +1305,6 @@ class VRYMainWindow(QMainWindow):
         
         settings_menu.addSeparator()
         
-        # Verbose level submenu
         verbose_menu = settings_menu.addMenu('Console Verbosity')
         self.verbose_group = []
         
@@ -1373,10 +1323,8 @@ class VRYMainWindow(QMainWindow):
             self.verbose_group.append((action, level))
     
     def apply_theme(self, theme):
-        """Apply theme to application"""
         self.current_theme = theme
         
-        # Main window stylesheet
         self.setStyleSheet(f"""
             QMainWindow {{
                 background-color: {theme.background};
@@ -1443,11 +1391,6 @@ class VRYMainWindow(QMainWindow):
             QMenu::item:selected {{
                 background-color: {theme.selection};
             }}
-            QToolBar {{
-                background-color: {theme.header};
-                border: none;
-                padding: 5px;
-            }}
             QComboBox {{
                 background-color: {theme.selection};
                 color: {theme.text};
@@ -1501,11 +1444,9 @@ class VRYMainWindow(QMainWindow):
             }}
         """)
         
-        # Apply to table
         if hasattr(self, 'player_table'):
             self.player_table.apply_theme(theme)
         
-        # Apply to console
         if hasattr(self, 'console_output'):
             self.console_output.setStyleSheet(f"""
                 QTextEdit {{
@@ -1516,17 +1457,14 @@ class VRYMainWindow(QMainWindow):
             """)
     
     def change_theme(self, theme_name):
-        """Change application theme"""
         if theme_name in THEMES:
             self.apply_theme(THEMES[theme_name])
             self.settings.setValue("theme", theme_name)
             
-            # Update theme menu
             for action in self.theme_group:
                 action.setChecked(action.text() == theme_name)
     
     def customize_theme(self):
-        """Open theme customization dialog"""
         dialog = ThemeCustomizationDialog(self, self.current_theme)
         if dialog.exec():
             custom_theme = dialog.get_custom_theme()
@@ -1534,19 +1472,15 @@ class VRYMainWindow(QMainWindow):
             self.change_theme("Custom")
     
     def set_verbose_level(self, level):
-        """Set console verbose level"""
         self.settings.setValue("verbose_level", level)
         
-        # Update menu
         for action, action_level in self.verbose_group:
             action.setChecked(action_level == level)
         
-        # Update worker thread
         if self.worker_thread:
             self.worker_thread.verbose_level = level
     
     def toggle_console_tab(self, checked):
-        """Toggle console tab visibility"""
         if checked:
             if self.tabs.indexOf(self.console_widget) == -1:
                 self.tabs.addTab(self.console_widget, "Console")
@@ -1558,29 +1492,10 @@ class VRYMainWindow(QMainWindow):
         self.settings.setValue("show_console", checked)
     
     def toggle_matchloadouts_tab(self, checked):
-        """Toggle match loadouts tab visibility"""
         if checked and not self.matchloadouts_web:
             if OPTIMIZED_WEBVIEW_AVAILABLE:
-                # Use optimized WebView container
                 self.matchloadouts_web = MatchLoadoutsContainer()
-                
-                # Apply auto-detected settings
-                if hasattr(self, 'auto_performance_mode') and self.auto_performance_mode:
-                    self.matchloadouts_web.perf_checkbox.setChecked(True)
-                    self.status_bar.showMessage(
-                        "Performance mode auto-enabled based on system resources", 
-                        3000
-                    )
-                    
-                # Note: auto_lightweight_mode code commented out as it doesn't exist in PyQt6 version
-                # if hasattr(self, 'auto_lightweight_mode') and self.auto_lightweight_mode:
-                #     self.matchloadouts_web.lightweight_checkbox.setChecked(True)
-                #     self.status_bar.showMessage(
-                #         "Lightweight mode auto-enabled due to limited resources", 
-                #         3000
-                #     )
             else:
-                # Fallback to standard WebView
                 self.matchloadouts_web = QWebEngineView()
                 self.matchloadouts_web.load(QUrl("https://vry-ui.netlify.app/matchLoadouts"))
                 
@@ -1591,7 +1506,6 @@ class VRYMainWindow(QMainWindow):
             if index != -1:
                 self.tabs.removeTab(index)
             
-            # Cleanup
             if hasattr(self.matchloadouts_web, 'cleanup'):
                 self.matchloadouts_web.cleanup()
             self.matchloadouts_web = None
@@ -1599,13 +1513,11 @@ class VRYMainWindow(QMainWindow):
         self.settings.setValue("show_matchloadouts", checked)
     
     def toggle_vtl_tab(self, checked):
-        """Toggle VTL.lol tab visibility"""
         if checked and not self.vtl_web:
             vtl_container = QWidget()
             vtl_layout = QVBoxLayout(vtl_container)
             vtl_layout.setContentsMargins(0, 0, 0, 0)
             
-            # Search bar
             search_layout = QHBoxLayout()
             search_layout.setContentsMargins(10, 10, 10, 10)
             
@@ -1628,10 +1540,8 @@ class VRYMainWindow(QMainWindow):
             search_widget.setLayout(search_layout)
             vtl_layout.addWidget(search_widget, 0)
             
-            # WebView
             self.vtl_web = QWebEngineView()
 
-            # Placeholder HTML
             placeholder_html = f"""
             <html>
             <head>
@@ -1676,7 +1586,6 @@ class VRYMainWindow(QMainWindow):
         self.settings.setValue("show_vtl", checked)
     
     def search_vtl_account(self):
-        """Search VTL account"""
         if not self.vtl_search_input or not self.vtl_web:
             return
         
@@ -1685,7 +1594,6 @@ class VRYMainWindow(QMainWindow):
             return
 
         try:
-            # Check if it's a PUUID
             if re.match(r"^[0-9a-fA-F-]{36}$", search_text):
                 vtl_url = f"https://vtl.lol/id/{search_text}"
                 self.vtl_web.load(QUrl(vtl_url))
@@ -1701,7 +1609,6 @@ class VRYMainWindow(QMainWindow):
             self.status_bar.showMessage(f"Error: {str(e)}", 3000)
 
     def start_vry(self):
-        """Start VRY worker thread"""
         verbose_level = self.settings.value("verbose_level", 0, type=int)
         
         if verbose_level > 0:
@@ -1711,37 +1618,49 @@ class VRYMainWindow(QMainWindow):
         self.worker_thread.output_signal.connect(self.on_console_output)
         self.worker_thread.error_signal.connect(self.on_console_error)
         self.worker_thread.table_update_signal.connect(self.on_table_update)
+        self.worker_thread.table_row_signal.connect(self.on_table_row_update)
         self.worker_thread.status_signal.connect(self.on_status_update)
         self.worker_thread.start()
     
     def refresh_data(self):
-        """Refresh data manually"""
         if self.worker_thread and self.worker_thread.running:
+            was_frozen = self.freeze_btn.isChecked()
+            if was_frozen:
+                self.freeze_btn.setChecked(False)
+                self.toggle_freeze(False)
+            
             if self.worker_thread.verbose_level > 0:
                 self.console_output.append("Refreshing data...\n")
             self.status_bar.showMessage("Refreshing...", 2000)
+            
+            if was_frozen:
+                QTimer.singleShot(500, lambda: self.freeze_btn.setChecked(True))
+                QTimer.singleShot(500, lambda: self.toggle_freeze(True))
     
     def on_console_output(self, text):
-        """Handle console output"""
         self.console_output.append(text)
     
     def on_console_error(self, text):
-        """Handle console error"""
         self.console_output.append(f"ERROR: {text}")
         self.status_bar.showMessage(f"Error: {text}", 5000)
     
+    def on_table_row_update(self, row_data, metadata):
+        if not self.freeze_btn.isChecked():
+            md = dict(metadata) if metadata else {}
+            md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
+            self.player_table.add_row_streaming(row_data, md)
+    
     def on_table_update(self, data, metadata):
-        """Handle table update"""
         self.player_table_data = data
         md = dict(metadata) if metadata else {}
         md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
         self.player_table_metadata = md
         
-        self.player_table.update_table(data, md)
-        self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
+        if not self.freeze_btn.isChecked():
+            self.player_table.update_table(data, md)
+            self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
     
     def on_status_update(self, state, extra_info):
-        """Handle status update"""
         state_display = {
             "INGAME": "🎮 In-Game",
             "PREGAME": "🎯 Agent Select",
@@ -1750,12 +1669,15 @@ class VRYMainWindow(QMainWindow):
         
         status_text = f"Status: {state_display}"
         if extra_info:
+            if "Attacker" in extra_info:
+                extra_info = extra_info.replace("Attacker", "⚔️ Attacker")
+            elif "Defender" in extra_info:
+                extra_info = extra_info.replace("Defender", "🛡️ Defender")
             status_text += f" • {extra_info}"
         
         self.status_label.setText(status_text)
     
     def on_incognito_privacy_changed(self, checked):
-        """Handle incognito privacy setting change"""
         if self.worker_thread:
             try:
                 self.worker_thread.incognito_privacy = checked
@@ -1768,13 +1690,10 @@ class VRYMainWindow(QMainWindow):
             self.on_table_update(self.player_table_data, self.player_table_metadata)
     
     def load_settings(self):
-        """Load application settings"""
-        # Theme
         theme_name = self.settings.value("theme", "Dark")
         if theme_name in THEMES:
             self.change_theme(theme_name)
         
-        # Tab visibility
         show_matchloadouts = self.settings.value("show_matchloadouts", True, type=bool)
         show_vtl = self.settings.value("show_vtl", False, type=bool)
         show_console = self.settings.value("show_console", False, type=bool)
@@ -1790,17 +1709,14 @@ class VRYMainWindow(QMainWindow):
         if show_console:
             self.toggle_console_tab(True)
         
-        # Incognito privacy
         incognito_privacy = self.settings.value("incognito_privacy", True, type=bool)
         self.incognito_privacy_menu_action.setChecked(incognito_privacy)
         
-        # Verbose level
         verbose_level = self.settings.value("verbose_level", 0, type=int)
         for action, level in self.verbose_group:
             action.setChecked(level == verbose_level)
     
     def save_settings(self):
-        """Save application settings"""
         self.settings.setValue("theme", self.current_theme.name)
         self.settings.setValue("show_matchloadouts", self.toggle_matchloadouts.isChecked())
         self.settings.setValue("show_vtl", self.toggle_vtl.isChecked())
@@ -1808,15 +1724,12 @@ class VRYMainWindow(QMainWindow):
         self.settings.setValue("incognito_privacy", self.incognito_privacy_menu_action.isChecked())
     
     def closeEvent(self, event):
-        """Handle application close event"""
         self.save_settings()
         
-        # Cleanup WebView resources
         if self.matchloadouts_web:
             if hasattr(self.matchloadouts_web, 'cleanup'):
                 self.matchloadouts_web.cleanup()
         
-        # Stop worker thread
         if self.worker_thread:
             self.worker_thread.stop()
             self.worker_thread.quit()
@@ -1826,7 +1739,6 @@ class VRYMainWindow(QMainWindow):
 
 
 def main():
-    """Main entry point"""
     
     if len(sys.argv) > 1 and sys.argv[1] == "--config":
         configure()
@@ -1836,13 +1748,11 @@ def main():
         if not run_app:
             sys.exit(0)
     
-    # Create Qt application
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName("VRY - UI v2")
+    app.setApplicationName("VRY - UI v2.13")
     app.setOrganizationName("VRY")
     
-    # Create and show main window
     window = VRYMainWindow()
     window.show()
     
