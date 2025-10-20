@@ -176,10 +176,13 @@ class VRYWorkerThread(QThread):
         self.running = False
         self.initialized = False
         self.game_state = None
+        self.current_game_state = None
         self.firstTime = True
         self.verbose_level = verbose_level
         self.loop = None
         self.freeze_table = False  # New freeze state
+        self.server = ""  # For heartbeat
+        self.team_side = None  # For heartbeat
         
     def set_freeze_state(self, frozen):
         self.freeze_table = frozen
@@ -246,6 +249,8 @@ class VRYWorkerThread(QThread):
             self.seasonActEp = self.content.get_act_episode_from_act_id(self.seasonID)
             self.previousSeasonActEp = self.content.get_act_episode_from_act_id(self.previousSeasonID)
             
+            self.current_theme_name = "Dark"  # Track theme name for mobile
+            
             self.initialized = True
             self.output_signal.emit(f"VRY Mobile - {self.get_ip()}:{self.cfg.port}")
             if self.verbose_level > 0:
@@ -271,6 +276,14 @@ class VRYWorkerThread(QThread):
         finally:
             s.close()
         return IP
+    
+    def send_heartbeat(self, heartbeat_data):
+        """Send heartbeat data to the server for mobile interface"""
+        try:
+            if hasattr(self, 'Server') and self.Server:
+                self.Server.send_payload("heartbeat", heartbeat_data)
+        except Exception as e:
+            self.log(f"Heartbeat error: {e}")
     
     def run(self):
         self.running = True
@@ -308,7 +321,58 @@ class VRYWorkerThread(QThread):
                     self.loop.close()
                 except Exception:
                     pass
-    
+                
+    def send_loadouts_data(self):
+        if not self.initialized or not hasattr(self, 'loadoutsClass'):
+            return
+            
+        try:
+            # Get current game state data
+            if hasattr(self, 'current_game_state') and self.current_game_state:
+                players_data = self.current_game_state.get('players', {})
+                
+                # Format loadouts data for mobile
+                loadouts_data = {
+                    "players": {},
+                    "weapons": {},
+                    "sprays": {},
+                    "buddies": {}
+                }
+                
+                for puuid, player in players_data.items():
+                    player_loadout = {
+                        "puuid": puuid,
+                        "name": player.get('name', 'Unknown'),
+                        "team": player.get('team', 'none'),
+                        "agent": player.get('agent', ''),
+                        "level": player.get('level', 1),
+                        "rank": player.get('rank', 0),
+                        "weapons": {}
+                    }
+                    
+                    # Get weapons data
+                    if 'weapons' in player:
+                        for weapon_name, weapon_data in player['weapons'].items():
+                            player_loadout['weapons'][weapon_name] = {
+                                "skin": weapon_data.get('skin', ''),
+                                "skinDisplayName": weapon_data.get('skinDisplayName', ''),
+                                "skinDisplayIcon": weapon_data.get('skinDisplayIcon', ''),
+                                "buddy": weapon_data.get('buddy_displayIcon', ''),
+                                "buddyName": weapon_data.get('buddy_displayName', '')
+                            }
+                    
+                    # Get sprays data
+                    if 'sprays' in player:
+                        loadouts_data['sprays'][puuid] = player['sprays']
+                    
+                    loadouts_data['players'][puuid] = player_loadout
+                
+                # Send to mobile via websocket
+                self.Server.update_loadouts(loadouts_data)
+                
+        except Exception as e:
+            self.log(f"Error sending loadouts data: {e}")
+            
     def process_game_state(self):
         try:
             if self.firstTime:
@@ -347,7 +411,6 @@ class VRYWorkerThread(QThread):
                     self.rank.invalidate_cached_responses()
                 self.log(f"new game state: {self.game_state}")
             
-            # dont process if table is frozen
             if self.freeze_table:
                 return
             
@@ -370,25 +433,48 @@ class VRYWorkerThread(QThread):
             table_data = []
             metadata = {"state": self.game_state, "mode": gamemode}
             
-            if self.game_state == "INGAME":
-                table_data, metadata = self.process_ingame_state_streaming(presence)
-            elif self.game_state == "PREGAME":
-                table_data, metadata = self.process_pregame_state_streaming(presence)
-                if metadata.get("starting_side"):
-                    status_extra = f"{gamemode} • {metadata['starting_side']}"
-            elif self.game_state == "MENUS":
-                table_data, metadata = self.process_menu_state_streaming(presence)
+            # Initialize heartbeat data
+            heartbeat_data = {
+                "time": int(time.time()),
+                "state": self.game_state,
+                "mode": gamemode,
+                "puuid": self.Requests.puuid,
+                "players": {},
+            }
+            
+            try:
+                if self.game_state == "INGAME":
+                    table_data, metadata, heartbeat_data = self.process_ingame_state_streaming(presence, heartbeat_data)
+                elif self.game_state == "PREGAME":
+                    table_data, metadata, heartbeat_data = self.process_pregame_state_streaming(presence, heartbeat_data)
+                    if metadata.get("starting_side"):
+                        status_extra = f"{gamemode} • {metadata['starting_side']}"
+                elif self.game_state == "MENUS":
+                    table_data, metadata, heartbeat_data = self.process_menu_state_streaming(presence, heartbeat_data)
+            except Exception as e:
+                self.error_signal.emit(f"Error processing {self.game_state} state: {str(e)}")
+                if self.verbose_level > 1:
+                    self.log(traceback.format_exc())
+                # Return empty data but don't break the entire process
+                table_data = []
+                metadata = {"state": self.game_state, "error": str(e)}
             
             self.status_signal.emit(self.game_state, status_extra)
             
             if table_data:
                 self.table_update_signal.emit(table_data, metadata)
                 
+            # Send heartbeat data
+            self.send_heartbeat(heartbeat_data)
+                
         except Exception as e:
             if self.verbose_level > 0:
                 self.error_signal.emit(f"State processing error: {str(e)}")
             if self.verbose_level > 1:
                 self.log(traceback.format_exc())
+        self.current_game_state = {"state": self.game_state}
+        if self.current_game_state.get("state") == "INGAME":
+            self.send_loadouts_data()
     
     def format_rank_with_act(self, rank_text, act, episode):
         if not rank_text or rank_text == "Unranked":
@@ -397,13 +483,13 @@ class VRYWorkerThread(QThread):
             return f"{rank_text} ({episode}A{act})"
         return rank_text
     
-    def process_ingame_state_streaming(self, presence):
+    def process_ingame_state_streaming(self, presence, heartbeat_data):
         table_data = []
         metadata = {"state": "INGAME"}
         
         coregame_stats = self.coregame.get_coregame_stats()
         if not coregame_stats:
-            return table_data, metadata
+            return table_data, metadata, heartbeat_data
         
         metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
@@ -434,9 +520,11 @@ class VRYWorkerThread(QThread):
                 Players, self.cfg.weapon, self.valoApiSkins, names, state="game"
             )
             loadouts = loadouts_arr[0]
+            loadouts_data = loadouts_arr[1] if len(loadouts_arr) > 1 else {}
         except (IndexError, KeyError) as e:
             self.log(f"Error fetching loadouts: {e}")
             loadouts = {}
+            loadouts_data = {}
         
         Players.sort(key=lambda p: p["PlayerIdentity"].get("AccountLevel"), reverse=True)
         Players.sort(key=lambda p: p["TeamID"], reverse=True)
@@ -450,19 +538,30 @@ class VRYWorkerThread(QThread):
                 allyTeam = p["TeamID"]
                 break
         
+        # Add map to heartbeat data
+        heartbeat_data["map"] = self.map_urls.get(coregame_stats["MapID"].lower(), "")
+        
         for player in Players:
             if not self.running or self.freeze_table:
                 break
                 
             party_icon = ""
+            partyNum = 0
             for party in partyOBJ:
                 if player["Subject"] in partyOBJ[party]:
                     if party not in partyIcons:
                         partyIcons[party] = PARTYICONLIST[partyCount]
                         party_icon = PARTYICONLIST[partyCount]
+                        partyNum = partyCount + 1
                         partyCount += 1
                     else:
                         party_icon = partyIcons[party]
+            
+            # FIX: Safe agent lookup with fallback
+            character_id = player["CharacterID"].lower()
+            agent_name = self.agent_dict.get(character_id, "None")
+            if agent_name == "None":
+                self.log(f"Unknown agent ID: {character_id}")
             
             playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
             previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
@@ -470,8 +569,9 @@ class VRYWorkerThread(QThread):
             ppstats = self.pstats.get_stats(player["Subject"])
             
             row_data = {
+                "puuid": player["Subject"],  # Added for heartbeat
                 "party": party_icon,
-                "agent": self.agent_dict.get(player["CharacterID"].lower(), ""),
+                "agent": agent_name,  # Use the safe lookup
                 "name": names[player["Subject"]],
                 "incognito": player["PlayerIdentity"]["Incognito"],
                 "team": player["TeamID"],
@@ -480,10 +580,12 @@ class VRYWorkerThread(QThread):
                 "is_party": player["Subject"] in partyMembersList,
                 "skin": loadouts.get(player["Subject"], ""),
                 "rank": NUMBERTORANKS[playerRank["rank"]],
+                "rank_number": playerRank["rank"],  # Added for heartbeat
                 "rank_act": self.seasonActEp.get("act"),
                 "rank_ep": self.seasonActEp.get("episode"),
                 "rr": playerRank["rr"],
                 "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
+                "peak_rank_number": playerRank["peakrank"],  # Added for heartbeat
                 "peak_act": playerRank.get("peakrankact"),
                 "peak_ep": playerRank.get("peakrankep"),
                 "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
@@ -505,10 +607,33 @@ class VRYWorkerThread(QThread):
             
             table_data.append(row_data)
             
+            # Add player data to heartbeat
+            heartbeat_data["players"][player["Subject"]] = {
+                "puuid": player["Subject"],
+                "name": names[player["Subject"]],
+                "partyNumber": partyNum if party_icon != "" else 0,
+                "agent": self.agent_dict.get(player["CharacterID"].lower(), "Unknown"),
+                "rank": playerRank["rank"],
+                "peakRank": playerRank["peakrank"],
+                "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
+                "rr": playerRank["rr"],
+                "kd": ppstats["kd"],
+                "headshotPercentage": ppstats["hs"],
+                "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
+                "level": player["PlayerIdentity"].get("AccountLevel", 0),
+                "agentImgLink": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Agent", None),
+                "team": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Team", None),
+                "sprays": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Sprays", None),
+                "title": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Title", None),
+                "playerCard": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("PlayerCard", None),
+                "weapons": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Weapons", None),
+            }
+            
+            # FIX: Also fix the stats saving part
             self.stats.save_data({
                 player["Subject"]: {
                     "name": names[player["Subject"]],
-                    "agent": self.agent_dict[player["CharacterID"].lower()],
+                    "agent": agent_name,  # Use the safe lookup here too
                     "map": self.current_map,
                     "rank": playerRank["rank"],
                     "rr": playerRank["rr"],
@@ -517,21 +642,22 @@ class VRYWorkerThread(QThread):
                 }
             })
         
-        return table_data, metadata
+        return table_data, metadata, heartbeat_data
     
-    def process_pregame_state_streaming(self, presence):
+    def process_pregame_state_streaming(self, presence, heartbeat_data):
         table_data = []
         metadata = {"state": "PREGAME"}
         
         pregame_stats = self.pregame.get_pregame_stats()
         if not pregame_stats:
-            return table_data, metadata
+            return table_data, metadata, heartbeat_data
         
         if self.cfg.get_feature_flag("starting_side") and pregame_stats:
             team_id = pregame_stats.get("AllyTeam", {}).get("TeamID")
             if team_id:
                 starting_side = "Attacker" if team_id == "Red" else "Defender"
                 metadata["starting_side"] = starting_side
+                self.team_side = starting_side
         
         metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
@@ -554,14 +680,22 @@ class VRYWorkerThread(QThread):
                 break
                 
             party_icon = ""
+            partyNum = 0
             for party in partyOBJ:
                 if player["Subject"] in partyOBJ[party]:
                     if party not in partyIcons:
                         partyIcons[party] = PARTYICONLIST[partyCount]
                         party_icon = PARTYICONLIST[partyCount]
-                        partyCount += 1
+                        partyNum = partyCount + 1
                     else:
                         party_icon = partyIcons[party]
+                    partyCount += 1
+            
+            # FIX: Safe agent lookup with fallback
+            character_id = player["CharacterID"].lower()
+            agent_name = self.agent_dict.get(character_id, "None")
+            if agent_name == "None":
+                self.log(f"Unknown agent ID: {character_id}")
             
             playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
             previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
@@ -570,8 +704,9 @@ class VRYWorkerThread(QThread):
             team_id = teams[0]["TeamID"] if teams else None
 
             row_data = {
+                "puuid": player["Subject"],  # Added for heartbeat
                 "party": party_icon,
-                "agent": self.agent_dict.get(player["CharacterID"].lower(), ""),
+                "agent": agent_name,  # Use the safe lookup
                 "agent_state": player["CharacterSelectionState"],
                 "name": names[player["Subject"]],
                 "incognito": player["PlayerIdentity"]["Incognito"],
@@ -580,10 +715,12 @@ class VRYWorkerThread(QThread):
                 "is_party": player["Subject"] in partyMembersList,
                 "skin": "",
                 "rank": NUMBERTORANKS[playerRank["rank"]],
+                "rank_number": playerRank["rank"],  # Added for heartbeat
                 "rank_act": self.seasonActEp.get("act"),
                 "rank_ep": self.seasonActEp.get("episode"),
                 "rr": playerRank["rr"],
                 "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
+                "peak_rank_number": playerRank["peakrank"],  # Added for heartbeat
                 "peak_act": playerRank.get("peakrankact"),
                 "peak_ep": playerRank.get("peakrankep"),
                 "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
@@ -604,10 +741,25 @@ class VRYWorkerThread(QThread):
                 self.table_row_signal.emit(row_data, metadata)
             
             table_data.append(row_data)
+            
+            # Add player data to heartbeat
+            heartbeat_data["players"][player["Subject"]] = {
+                "name": names[player["Subject"]],
+                "partyNumber": partyNum if party_icon != "" else 0,
+                "agent": self.agent_dict.get(player["CharacterID"].lower(), "Unknown"),
+                "rank": playerRank["rank"],
+                "peakRank": playerRank["peakrank"],
+                "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
+                "level": player["PlayerIdentity"].get("AccountLevel", 0),
+                "rr": playerRank["rr"],
+                "kd": ppstats["kd"],
+                "headshotPercentage": ppstats["hs"],
+                "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
+            }
         
-        return table_data, metadata
+        return table_data, metadata, heartbeat_data
     
-    def process_menu_state_streaming(self, presence):
+    def process_menu_state_streaming(self, presence, heartbeat_data):
         table_data = []
         metadata = {"state": "MENUS"}
         
@@ -627,6 +779,7 @@ class VRYWorkerThread(QThread):
                 ppstats = self.pstats.get_stats(player["Subject"])
                 
                 row_data = {
+                    "puuid": player["Subject"],  # Added for heartbeat
                     "party": PARTYICONLIST[0],
                     "agent": "",
                     "name": names[player["Subject"]],
@@ -635,10 +788,12 @@ class VRYWorkerThread(QThread):
                     "is_party": True,
                     "skin": "",
                     "rank": NUMBERTORANKS[playerRank["rank"]],
+                    "rank_number": playerRank["rank"],  # Added for heartbeat
                     "rank_act": self.seasonActEp.get("act"),
                     "rank_ep": self.seasonActEp.get("episode"),
                     "rr": playerRank["rr"],
                     "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
+                    "peak_rank_number": playerRank["peakrank"],  # Added for heartbeat
                     "peak_act": playerRank.get("peakrankact"),
                     "peak_ep": playerRank.get("peakrankep"),
                     "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
@@ -659,9 +814,23 @@ class VRYWorkerThread(QThread):
                     self.table_row_signal.emit(row_data, metadata)
                 
                 table_data.append(row_data)
+                
+                # Add player data to heartbeat
+                heartbeat_data["players"][player["Subject"]] = {
+                    "name": names[player["Subject"]],
+                    "rank": playerRank["rank"],
+                    "peakRank": playerRank["peakrank"],
+                    "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
+                    "level": player["PlayerIdentity"].get("AccountLevel", 0),
+                    "rr": playerRank["rr"],
+                    "kd": ppstats["kd"],
+                    "headshotPercentage": ppstats["hs"],
+                    "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
+                }
+                
                 seen.append(player["Subject"])
         
-        return table_data, metadata
+        return table_data, metadata, heartbeat_data
     
     def stop(self):
         self.running = False
@@ -741,6 +910,12 @@ class VRYTableWidget(QTableWidget):
 
     def apply_theme(self, theme):
         self.current_theme = theme
+        self.current_theme_name = theme.name
+        
+        # Send theme update to mobile
+        if hasattr(self, 'worker_thread') and self.worker_thread and hasattr(self.worker_thread, 'server'):
+            self.worker_thread.server.update_theme(theme.name)
+            
         self.setStyleSheet(f"""
             QTableWidget {{
                 background-color: {theme.table_bg};
@@ -1120,6 +1295,8 @@ class VRYMainWindow(QMainWindow):
         self.config = Config(None)
         self.show_resource_warning = self.config.get_feature_flag("show_resource_warning")
         
+        self.current_theme_name = "Dark"
+        
         self.init_ui()
         self.load_settings()
         
@@ -1187,13 +1364,13 @@ class VRYMainWindow(QMainWindow):
         
         status_layout.addStretch()
         
-        self.freeze_btn = QPushButton("❄ Freeze Table")
+        self.freeze_btn = QPushButton("Freeze Table")
         self.freeze_btn.setCheckable(True)
         self.freeze_btn.setMaximumWidth(140)
         self.freeze_btn.clicked.connect(self.toggle_freeze)
         status_layout.addWidget(self.freeze_btn)
         
-        self.refresh_btn = QPushButton("↻ Refresh")
+        self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setMaximumWidth(100)
         self.refresh_btn.clicked.connect(self.refresh_data)
         status_layout.addWidget(self.refresh_btn)
@@ -1225,7 +1402,7 @@ class VRYMainWindow(QMainWindow):
             self.worker_thread.set_freeze_state(checked)
         
         if checked:
-            self.freeze_btn.setText("❄ Unfreeze Table")
+            self.freeze_btn.setText("Unfreeze Table")
             self.freeze_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: #4a90e2;
@@ -1235,7 +1412,7 @@ class VRYMainWindow(QMainWindow):
             """)
             self.status_bar.showMessage("Table frozen - updates paused", 3000)
         else:
-            self.freeze_btn.setText("❄ Freeze Table")
+            self.freeze_btn.setText("Freeze Table")
             self.freeze_btn.setStyleSheet("")
             self.status_bar.showMessage("Table unfrozen - updates resumed", 3000)
     
@@ -1501,6 +1678,10 @@ class VRYMainWindow(QMainWindow):
                 
             self.tabs.addTab(self.matchloadouts_web, "Match Loadouts")
             
+            # Notify mobile about loadouts tab activation
+            if hasattr(self, 'worker_thread') and self.worker_thread:
+                self.worker_thread.send_loadouts_data()
+            
         elif not checked and self.matchloadouts_web:
             index = self.tabs.indexOf(self.matchloadouts_web)
             if index != -1:
@@ -1662,18 +1843,18 @@ class VRYMainWindow(QMainWindow):
     
     def on_status_update(self, state, extra_info):
         state_display = {
-            "INGAME": "🎮 In-Game",
-            "PREGAME": "🎯 Agent Select",
-            "MENUS": "📋 In-Menus"
+            "INGAME": "In-Game",
+            "PREGAME": "Agent Select",
+            "MENUS": "In-Menus"
         }.get(state, state)
         
         status_text = f"Status: {state_display}"
         if extra_info:
             if "Attacker" in extra_info:
-                extra_info = extra_info.replace("Attacker", "⚔️ Attacker")
+                extra_info = extra_info.replace("Attacker", "⚔ Attacker")
             elif "Defender" in extra_info:
-                extra_info = extra_info.replace("Defender", "🛡️ Defender")
-            status_text += f" • {extra_info}"
+                extra_info = extra_info.replace("Defender", "🛡 Defender")
+            status_text += f"{extra_info}"
         
         self.status_label.setText(status_text)
     
