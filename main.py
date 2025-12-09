@@ -1,6 +1,6 @@
 """
-VRY - UI v2.13
-updated with starting_side, faster player display, and freeze functionality
+VRY - UI v2.14
+Fixed: Event loop crash, optimized for lightweight usage
 """
 
 import asyncio
@@ -14,9 +14,11 @@ import threading
 from pathlib import Path
 from io import StringIO
 import re
+from collections import OrderedDict
+from functools import lru_cache
+
 ANSI_RGB_RE = re.compile(r'\x1B\[38;2;(\d+);(\d+);(\d+)m')
 ANSI_ANY_RE = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
-ANSI_RESET_RE = re.compile(r'\x1B\[0m')
 
 import requests
 import urllib3
@@ -42,12 +44,10 @@ try:
 except ImportError as e:
     print("Please install PySide6-Essentials:")
     print("pip install PySide6-Essentials")
-    print(f"Error getting system info: {e}")
     sys.exit(1)
 
 try:
     import psutil
-    import platform
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
@@ -56,7 +56,6 @@ try:
     from src.webview import MatchLoadoutsContainer
     OPTIMIZED_WEBVIEW_AVAILABLE = True
 except ImportError:
-    print("Warning: webview.py not found. Using standard WebView.")
     OPTIMIZED_WEBVIEW_AVAILABLE = False
 
 from src.colors import Colors
@@ -87,6 +86,38 @@ from src.account_manager.account_auth import AccountAuth
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+class LRUCache:
+    """Simple LRU cache for API responses"""
+    def __init__(self, maxsize=128, ttl=300):
+        self.cache = OrderedDict()
+        self.maxsize = maxsize
+        self.ttl = ttl  # seconds
+    
+    def get(self, key):
+        if key in self.cache:
+            value, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                self.cache.move_to_end(key)
+                return value
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key, value):
+        if key in self.cache:
+            del self.cache[key]
+        elif len(self.cache) >= self.maxsize:
+            self.cache.popitem(last=False)
+        self.cache[key] = (value, time.time())
+    
+    def invalidate(self, key=None):
+        if key:
+            self.cache.pop(key, None)
+        else:
+            self.cache.clear()
+
+
 class Theme:
     def __init__(self, name, background, text, border, alternate, selection, header, 
                  table_bg, table_text, table_grid, status_bg, accent):
@@ -103,63 +134,16 @@ class Theme:
         self.status_bg = status_bg
         self.accent = accent
 
+
 THEMES = {
-    "Dark": Theme(
-        "Dark",
-        background="#1a1a1a",
-        text="#e0e0e0",
-        border="#333333",
-        alternate="#252525",
-        selection="#3d3d3d",
-        header="#2b2b2b",
-        table_bg="#1e1e1e",
-        table_text="#ffffff",
-        table_grid="#2a2a2a",
-        status_bg="#007acc",
-        accent="#007acc"
-    ),
-    "Light": Theme(
-        "Light",
-        background="#f5f5f5",
-        text="#333333",
-        border="#cccccc",
-        alternate="#e8e8e8",
-        selection="#d0e3ff",
-        header="#e0e0e0",
-        table_bg="#ffffff",
-        table_text="#000000",
-        table_grid="#dddddd",
-        status_bg="#0078d4",
-        accent="#0078d4"
-    ),
-    "Midnight": Theme(
-        "Midnight",
-        background="#0d1117",
-        text="#c9d1d9",
-        border="#30363d",
-        alternate="#161b22",
-        selection="#1f6feb",
-        header="#010409",
-        table_bg="#0d1117",
-        table_text="#c9d1d9",
-        table_grid="#21262d",
-        status_bg="#1f6feb",
-        accent="#58a6ff"
-    ),
-    "Valorant": Theme(
-        "Valorant",
-        background="#0f1923",
-        text="#ffffff",
-        border="#ff4655",
-        alternate="#1b2838",
-        selection="#ff4655",
-        header="#111111",
-        table_bg="#0f1923",
-        table_text="#ffffff",
-        table_grid="#ff4655",
-        status_bg="#ff4655",
-        accent="#ff4655"
-    )
+    "Dark": Theme("Dark", "#1a1a1a", "#e0e0e0", "#333333", "#252525", "#3d3d3d", 
+                  "#2b2b2b", "#1e1e1e", "#ffffff", "#2a2a2a", "#007acc", "#007acc"),
+    "Light": Theme("Light", "#f5f5f5", "#333333", "#cccccc", "#e8e8e8", "#d0e3ff",
+                   "#e0e0e0", "#ffffff", "#000000", "#dddddd", "#0078d4", "#0078d4"),
+    "Midnight": Theme("Midnight", "#0d1117", "#c9d1d9", "#30363d", "#161b22", "#1f6feb",
+                      "#010409", "#0d1117", "#c9d1d9", "#21262d", "#1f6feb", "#58a6ff"),
+    "Valorant": Theme("Valorant", "#0f1923", "#ffffff", "#ff4655", "#1b2838", "#ff4655",
+                      "#111111", "#0f1923", "#ffffff", "#ff4655", "#ff4655", "#ff4655")
 }
 
 
@@ -176,13 +160,18 @@ class VRYWorkerThread(QThread):
         self.running = False
         self.initialized = False
         self.game_state = None
-        self.current_game_state = None
         self.firstTime = True
         self.verbose_level = verbose_level
         self.loop = None
-        self.freeze_table = False  # New freeze state
-        self.server = ""  # For heartbeat
-        self.team_side = None  # For heartbeat
+        self.freeze_table = False
+        
+        # Caching
+        self.player_cache = LRUCache(maxsize=64, ttl=60)
+        self.pregame_players_cache = {}  # Cache pregame data for ingame reuse
+        self.last_match_id = None
+        
+        # Shutdown coordination
+        self._shutdown_event = threading.Event()
         
     def set_freeze_state(self, frozen):
         self.freeze_table = frozen
@@ -193,7 +182,7 @@ class VRYWorkerThread(QThread):
             self.log = self.Logging.log
             
             if self.verbose_level > 0:
-                self.output_signal.emit(f"Operating system: {get_os()}\n")
+                self.output_signal.emit(f"OS: {get_os()}\n")
             
             self.acc_manager = AccountManager(self.log, AccountConfig, AccountAuth, NUMBERTORANKS)
             self.ErrorSRC = Error(self.log, self.acc_manager)
@@ -230,34 +219,26 @@ class VRYWorkerThread(QThread):
             self.loadoutsClass = Loadouts(self.Requests, self.log, self.colors, 
                                          self.Server, self.current_map)
             self.table = Table(self.cfg, self.log)
-            
             self.stats = Stats()
             
-            if self.cfg.get_feature_flag("discord_rpc"):
-                self.rpc = Rpc(self.map_urls, gamemodes, self.colors, self.log)
-            else:
-                self.rpc = None
+            self.rpc = Rpc(self.map_urls, gamemodes, self.colors, self.log) if self.cfg.get_feature_flag("discord_rpc") else None
             
             self.Wss = Ws(self.Requests.lockfile, self.Requests, self.cfg, 
                          self.colors, hide_names, self.Server, self.rpc)
             
-            self.valoApiSkins = requests.get("https://valorant-api.com/v1/weapons/skins")
+            # Cache static API data
+            self.valoApiSkins = requests.get("https://valorant-api.com/v1/weapons/skins", timeout=10)
             self.gameContent = self.content.get_content()
             self.seasonID = self.content.get_latest_season_id(self.gameContent)
             self.previousSeasonID = self.content.get_previous_season_id(self.gameContent)
-            
             self.seasonActEp = self.content.get_act_episode_from_act_id(self.seasonID)
             self.previousSeasonActEp = self.content.get_act_episode_from_act_id(self.previousSeasonID)
             
-            self.current_theme_name = "Dark"  # Track theme name for mobile
-            
             self.initialized = True
             self.output_signal.emit(f"VRY Mobile - {self.get_ip()}:{self.cfg.port}")
-            if self.verbose_level > 0:
-                self.output_signal.emit("Initialization complete")
             
         except Exception as e:
-            self.error_signal.emit(f"Initialization error: {str(e)}")
+            self.error_signal.emit(f"Init error: {str(e)}")
             if self.verbose_level > 1:
                 self.log(traceback.format_exc())
     
@@ -266,28 +247,28 @@ class VRYWorkerThread(QThread):
             self.output_signal.emit(f"[DEBUG] {message}")
             
     def get_ip(self):
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0)
         try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0)
             s.connect(("10.254.254.254", 1))
             IP = s.getsockname()[0]
-        except Exception:
-            IP = "127.0.0.1"
-        finally:
             s.close()
-        return IP
+            return IP
+        except Exception:
+            return "127.0.0.1"
     
     def send_heartbeat(self, heartbeat_data):
-        """Send heartbeat data to the server for mobile interface"""
         try:
             if hasattr(self, 'Server') and self.Server:
                 self.Server.send_payload("heartbeat", heartbeat_data)
-        except Exception as e:
-            self.log(f"Heartbeat error: {e}")
+        except Exception:
+            pass
     
     def run(self):
         self.running = True
+        self._shutdown_event.clear()
         
+        # Create dedicated event loop for this thread
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         
@@ -299,141 +280,74 @@ class VRYWorkerThread(QThread):
                 self.error_signal.emit("Failed to initialize VRY")
                 return
             
-            while self.running:
+            while self.running and not self._shutdown_event.is_set():
                 try:
                     self.process_game_state()
-                    for _ in range(20):
-                        if not self.running:
-                            break
-                        self.msleep(100)
+                except asyncio.CancelledError:
+                    break
                 except Exception as e:
                     if self.verbose_level > 0:
                         self.error_signal.emit(f"Processing error: {str(e)}")
                     if self.verbose_level > 1:
                         self.log(traceback.format_exc())
-                    for _ in range(50):
-                        if not self.running:
-                            break
-                        self.msleep(100)
-        finally:
-            if self.loop:
-                try:
-                    self.loop.close()
-                except Exception:
-                    pass
                 
-    def send_loadouts_data(self):
-        if not self.initialized or not hasattr(self, 'loadoutsClass'):
+                # Interruptible sleep
+                for _ in range(20):
+                    if not self.running or self._shutdown_event.is_set():
+                        break
+                    self.msleep(100)
+                    
+        except Exception as e:
+            self.error_signal.emit(f"Thread error: {str(e)}")
+        finally:
+            self._cleanup_loop()
+    
+    def _cleanup_loop(self):
+        """Safely cleanup the event loop"""
+        if self.loop and not self.loop.is_closed():
+            try:
+                # Cancel pending tasks
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                
+                # Give tasks time to cancel
+                if pending:
+                    self.loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                    
+                self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+                self.loop.close()
+            except Exception:
+                pass
+            finally:
+                self.loop = None
+                
+    def process_game_state(self):
+        if self._shutdown_event.is_set():
             return
             
         try:
-            # Get current game state data
-            if hasattr(self, 'current_game_state') and self.current_game_state:
-                players_data = self.current_game_state.get('players', {})
-                
-                # Format loadouts data for mobile
-                loadouts_data = {
-                    "players": {},
-                    "weapons": {},
-                    "sprays": {},
-                    "buddies": {}
-                }
-                
-                for puuid, player in players_data.items():
-                    player_loadout = {
-                        "puuid": puuid,
-                        "name": player.get('name', 'Unknown'),
-                        "team": player.get('team', 'none'),
-                        "agent": player.get('agent', ''),
-                        "level": player.get('level', 1),
-                        "rank": player.get('rank', 0),
-                        "weapons": {}
-                    }
-                    
-                    # Get weapons data
-                    if 'weapons' in player:
-                        for weapon_name, weapon_data in player['weapons'].items():
-                            player_loadout['weapons'][weapon_name] = {
-                                "skin": weapon_data.get('skin', ''),
-                                "skinDisplayName": weapon_data.get('skinDisplayName', ''),
-                                "skinDisplayIcon": weapon_data.get('skinDisplayIcon', ''),
-                                "buddy": weapon_data.get('buddy_displayIcon', ''),
-                                "buddyName": weapon_data.get('buddy_displayName', '')
-                            }
-                    
-                    # Get sprays data
-                    if 'sprays' in player:
-                        loadouts_data['sprays'][puuid] = player['sprays']
-                    
-                    loadouts_data['players'][puuid] = player_loadout
-                
-                # Send to mobile via websocket
-                self.Server.update_loadouts(loadouts_data)
-                
-        except Exception as e:
-            self.log(f"Error sending loadouts data: {e}")
-            
-    def process_game_state(self):
-        try:
             if self.firstTime:
-                run = True
-                while run and self.running:
-                    presence = self.presences.get_presence()
-                    private_presence = self.presences.get_private_presence(presence)
-                    # wait until your own valorant presence is initialized
-                    if private_presence is not None:
-                        if self.cfg.get_feature_flag("discord_rpc"):
-                            self.rpc.set_rpc(private_presence)
-                        game_state = self.presences.get_game_state(presence)
-                        if game_state is not None:
-                            run = False
-                    for _ in range(20):
-                        if not self.running:
-                            break
-                        self.msleep(100)
-                self.log(f"first game state: {self.game_state}")
+                self._wait_for_initial_presence()
                 self.firstTime = False
             else:
-                previous_game_state = self.game_state
-                
-                if self.loop and not self.loop.is_closed():
-                    self.game_state = self.loop.run_until_complete(
-                        self.Wss.recconect_to_websocket(self.game_state)
-                    )
-                else:
-                    self.loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(self.loop)
-                    self.game_state = self.loop.run_until_complete(
-                        self.Wss.recconect_to_websocket(self.game_state)
-                    )
-                
-                if previous_game_state != self.game_state and self.game_state == "MENUS":
-                    self.rank.invalidate_cached_responses()
-                self.log(f"new game state: {self.game_state}")
+                self._wait_for_state_change()
             
-            if self.freeze_table:
+            if self.freeze_table or self._shutdown_event.is_set():
                 return
             
             presence = self.presences.get_presence()
             priv_presence = self.presences.get_private_presence(presence)
             
-            if priv_presence["provisioningFlow"] == "CustomGame" or priv_presence["partyPresenceData"]["partyState"] == "CUSTOM_GAME_SETUP":
-                gamemode = "Custom Game"
-            else:
-                gamemode = gamemodes.get(priv_presence["queueId"])
+            if not priv_presence:
+                return
             
-            game_state_names = {
-                "INGAME": "In-Game",
-                "PREGAME": "Agent Select",
-                "MENUS": "In-Menus"
-            }
-            
-            status_extra = gamemode
+            gamemode = self._get_gamemode(priv_presence)
             
             table_data = []
             metadata = {"state": self.game_state, "mode": gamemode}
-            
-            # Initialize heartbeat data
             heartbeat_data = {
                 "time": int(time.time()),
                 "state": self.game_state,
@@ -444,222 +358,230 @@ class VRYWorkerThread(QThread):
             
             try:
                 if self.game_state == "INGAME":
-                    table_data, metadata, heartbeat_data = self.process_ingame_state_streaming(presence, heartbeat_data)
+                    table_data, metadata, heartbeat_data = self.process_ingame_state(presence, heartbeat_data)
                 elif self.game_state == "PREGAME":
-                    table_data, metadata, heartbeat_data = self.process_pregame_state_streaming(presence, heartbeat_data)
-                    if metadata.get("starting_side"):
-                        status_extra = f"{gamemode} • {metadata['starting_side']}"
+                    table_data, metadata, heartbeat_data = self.process_pregame_state(presence, heartbeat_data)
                 elif self.game_state == "MENUS":
-                    table_data, metadata, heartbeat_data = self.process_menu_state_streaming(presence, heartbeat_data)
+                    table_data, metadata, heartbeat_data = self.process_menu_state(presence, heartbeat_data)
+                    # Clear pregame cache when back in menus
+                    self.pregame_players_cache.clear()
             except Exception as e:
-                self.error_signal.emit(f"Error processing {self.game_state} state: {str(e)}")
+                self.error_signal.emit(f"Error processing {self.game_state}: {str(e)}")
                 if self.verbose_level > 1:
                     self.log(traceback.format_exc())
-                # Return empty data but don't break the entire process
-                table_data = []
-                metadata = {"state": self.game_state, "error": str(e)}
             
-            self.status_signal.emit(self.game_state, status_extra)
+            self.status_signal.emit(self.game_state, gamemode)
             
             if table_data:
                 self.table_update_signal.emit(table_data, metadata)
                 
-            # Send heartbeat data
             self.send_heartbeat(heartbeat_data)
                 
         except Exception as e:
             if self.verbose_level > 0:
-                self.error_signal.emit(f"State processing error: {str(e)}")
-            if self.verbose_level > 1:
-                self.log(traceback.format_exc())
-        self.current_game_state = {"state": self.game_state}
-        if self.current_game_state.get("state") == "INGAME":
-            self.send_loadouts_data()
+                self.error_signal.emit(f"State error: {str(e)}")
+
+    def _wait_for_initial_presence(self):
+        """Wait for initial Valorant presence"""
+        while self.running and not self._shutdown_event.is_set():
+            presence = self.presences.get_presence()
+            private_presence = self.presences.get_private_presence(presence)
+            
+            if private_presence:
+                if self.rpc:
+                    self.rpc.set_rpc(private_presence)
+                self.game_state = self.presences.get_game_state(presence)
+                if self.game_state:
+                    self.log(f"Initial state: {self.game_state}")
+                    return
+            
+            for _ in range(20):
+                if not self.running or self._shutdown_event.is_set():
+                    return
+                self.msleep(100)
+
+    def _wait_for_state_change(self):
+        """Wait for game state change via websocket"""
+        if not self.loop or self.loop.is_closed():
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+        
+        previous_state = self.game_state
+        
+        try:
+            self.game_state = self.loop.run_until_complete(
+                self.Wss.recconect_to_websocket(self.game_state)
+            )
+        except asyncio.CancelledError:
+            return
+        except RuntimeError as e:
+            if "Event loop stopped" in str(e) or "Event loop is closed" in str(e):
+                return
+            raise
+        except Exception as e:
+            self.log(f"Websocket error: {e}")
+            return
+        
+        if previous_state != self.game_state:
+            self.log(f"State change: {previous_state} -> {self.game_state}")
+            if self.game_state == "MENUS":
+                self.rank.invalidate_cached_responses()
+                self.player_cache.invalidate()
+
+    def _get_gamemode(self, priv_presence):
+        if priv_presence["provisioningFlow"] == "CustomGame" or \
+           priv_presence["partyPresenceData"]["partyState"] == "CUSTOM_GAME_SETUP":
+            return "Custom Game"
+        return gamemodes.get(priv_presence["queueId"], "Unknown")
+
+    def _get_cached_player_data(self, puuid):
+        """Get cached player data if available"""
+        return self.player_cache.get(puuid)
     
-    def format_rank_with_act(self, rank_text, act, episode):
-        if not rank_text or rank_text == "Unranked":
-            return rank_text
-        if act and episode:
-            return f"{rank_text} ({episode}A{act})"
-        return rank_text
-    
-    def process_ingame_state_streaming(self, presence, heartbeat_data):
+    def _cache_player_data(self, puuid, data):
+        """Cache player data"""
+        self.player_cache.set(puuid, data)
+
+    def process_ingame_state(self, presence, heartbeat_data):
         table_data = []
-        metadata = {"state": "INGAME"}
+        metadata = {"state": "INGAME", "clear_table": True}
         
         coregame_stats = self.coregame.get_coregame_stats()
         if not coregame_stats:
             return table_data, metadata, heartbeat_data
         
-        metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
         
         Players = coregame_stats["Players"]
+        match_id = self.coregame.get_coregame_match_id()
+        
+        # Check if this is same match as pregame
+        reuse_pregame = (self.last_match_id == match_id and self.pregame_players_cache)
+        
         partyMembers = self.menu.get_party_members(self.Requests.puuid, presence)
         partyMembersList = [a["Subject"] for a in partyMembers]
         
+        # Set up player data for websocket
         players_data = {"ignore": partyMembersList}
         for player in Players:
-            if player["Subject"] == self.Requests.puuid and self.cfg.get_feature_flag("discord_rpc"):
+            if player["Subject"] == self.Requests.puuid and self.rpc:
                 self.rpc.set_data({"agent": player["CharacterID"]})
-            players_data.update({
-                player["Subject"]: {
-                    "team": player["TeamID"],
-                    "agent": player["CharacterID"],
-                    "streamer_mode": player["PlayerIdentity"]["Incognito"]
-                }
-            })
+            players_data[player["Subject"]] = {
+                "team": player["TeamID"],
+                "agent": player["CharacterID"],
+                "streamer_mode": player["PlayerIdentity"]["Incognito"]
+            }
         self.Wss.set_player_data(players_data)
         
         self.presences.wait_for_presence(self.namesClass.get_players_puuid(Players))
         names = self.namesClass.get_names_from_puuids(Players)
         
+        # Get loadouts
         try:
             loadouts_arr = self.loadoutsClass.get_match_loadouts(
-                self.coregame.get_coregame_match_id(),
-                Players, self.cfg.weapon, self.valoApiSkins, names, state="game"
+                match_id, Players, self.cfg.weapon, self.valoApiSkins, names, state="game"
             )
             loadouts = loadouts_arr[0]
             loadouts_data = loadouts_arr[1] if len(loadouts_arr) > 1 else {}
-        except (IndexError, KeyError) as e:
-            self.log(f"Error fetching loadouts: {e}")
-            loadouts = {}
-            loadouts_data = {}
+        except Exception as e:
+            self.log(f"Loadouts error: {e}")
+            loadouts, loadouts_data = {}, {}
         
-        Players.sort(key=lambda p: p["PlayerIdentity"].get("AccountLevel"), reverse=True)
-        Players.sort(key=lambda p: p["TeamID"], reverse=True)
-        
-        partyOBJ = self.menu.get_party_json(self.namesClass.get_players_puuid(Players), presence)
-        partyIcons = {}
-        partyCount = 0
+        # Sort: by level desc, then by team (allies first)
         allyTeam = None
         for p in Players:
             if p["Subject"] == self.Requests.puuid:
                 allyTeam = p["TeamID"]
                 break
         
-        # Add map to heartbeat data
+        # Keep original API order within teams but group by team
+        ally_players = [p for p in Players if p["TeamID"] == allyTeam]
+        enemy_players = [p for p in Players if p["TeamID"] != allyTeam]
+        Players = ally_players + enemy_players
+        
+        partyOBJ = self.menu.get_party_json(self.namesClass.get_players_puuid(Players), presence)
+        partyIcons = {}
+        partyCount = 0
+        
         heartbeat_data["map"] = self.map_urls.get(coregame_stats["MapID"].lower(), "")
         
         for player in Players:
             if not self.running or self.freeze_table:
                 break
-                
-            party_icon = ""
-            partyNum = 0
+            
+            puuid = player["Subject"]
+            
+            # Party icon
+            party_icon, partyNum = "", 0
             for party in partyOBJ:
-                if player["Subject"] in partyOBJ[party]:
+                if puuid in partyOBJ[party]:
                     if party not in partyIcons:
                         partyIcons[party] = PARTYICONLIST[partyCount]
-                        party_icon = PARTYICONLIST[partyCount]
-                        partyNum = partyCount + 1
                         partyCount += 1
-                    else:
-                        party_icon = partyIcons[party]
+                    party_icon = partyIcons[party]
+                    partyNum = partyCount
             
-            # FIX: Safe agent lookup with fallback
-            character_id = player["CharacterID"].lower()
-            agent_name = self.agent_dict.get(character_id, "None")
-            if agent_name == "None":
-                self.log(f"Unknown agent ID: {character_id}")
+            agent_name = self.agent_dict.get(player["CharacterID"].lower(), "Unknown")
             
-            playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
-            previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
+            # Try to reuse pregame data for allies
+            cached_data = self.pregame_players_cache.get(puuid) if reuse_pregame and player["TeamID"] == allyTeam else None
             
-            ppstats = self.pstats.get_stats(player["Subject"])
+            if cached_data:
+                playerRank = cached_data["rank_data"]
+                previousPlayerRank = cached_data["prev_rank_data"]
+                ppstats = cached_data["stats"]
+            else:
+                playerRank = self.rank.get_rank(puuid, self.seasonID)
+                previousPlayerRank = self.rank.get_rank(puuid, self.previousSeasonID)
+                ppstats = self.pstats.get_stats(puuid)
             
-            row_data = {
-                "puuid": player["Subject"],  # Added for heartbeat
-                "party": party_icon,
-                "agent": agent_name,  # Use the safe lookup
-                "name": names[player["Subject"]],
-                "incognito": player["PlayerIdentity"]["Incognito"],
-                "team": player["TeamID"],
-                "ally_team": allyTeam,
-                "is_self": player["Subject"] == self.Requests.puuid,
-                "is_party": player["Subject"] in partyMembersList,
-                "skin": loadouts.get(player["Subject"], ""),
-                "rank": NUMBERTORANKS[playerRank["rank"]],
-                "rank_number": playerRank["rank"],  # Added for heartbeat
-                "rank_act": self.seasonActEp.get("act"),
-                "rank_ep": self.seasonActEp.get("episode"),
-                "rr": playerRank["rr"],
-                "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
-                "peak_rank_number": playerRank["peakrank"],  # Added for heartbeat
-                "peak_act": playerRank.get("peakrankact"),
-                "peak_ep": playerRank.get("peakrankep"),
-                "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
-                "previous_act": self.previousSeasonActEp.get("act"),
-                "previous_ep": self.previousSeasonActEp.get("episode"),
-                "leaderboard": playerRank["leaderboard"],
-                "hs": ppstats["hs"],
-                "kd": ppstats["kd"],
-                "wr": playerRank["wr"],
-                "games": playerRank['numberofgames'],
-                "level": player["PlayerIdentity"].get("AccountLevel"),
-                "hide_level": player["PlayerIdentity"]["HideAccountLevel"],
-                "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
-                "afk_penalty": ppstats.get("AFKPenalty", "N/A")
-            }
+            row_data = self._build_row_data(
+                player, names, party_icon, agent_name, loadouts,
+                playerRank, previousPlayerRank, ppstats,
+                partyMembersList, allyTeam
+            )
             
             if not self.freeze_table:
                 self.table_row_signal.emit(row_data, metadata)
             
             table_data.append(row_data)
             
-            # Add player data to heartbeat
-            heartbeat_data["players"][player["Subject"]] = {
-                "puuid": player["Subject"],
-                "name": names[player["Subject"]],
-                "partyNumber": partyNum if party_icon != "" else 0,
-                "agent": self.agent_dict.get(player["CharacterID"].lower(), "Unknown"),
-                "rank": playerRank["rank"],
-                "peakRank": playerRank["peakrank"],
-                "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
-                "rr": playerRank["rr"],
-                "kd": ppstats["kd"],
-                "headshotPercentage": ppstats["hs"],
-                "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
-                "level": player["PlayerIdentity"].get("AccountLevel", 0),
-                "agentImgLink": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Agent", None),
-                "team": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Team", None),
-                "sprays": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Sprays", None),
-                "title": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Title", None),
-                "playerCard": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("PlayerCard", None),
-                "weapons": loadouts_data.get("Players", {}).get(player["Subject"], {}).get("Weapons", None),
-            }
+            # Build heartbeat player data
+            heartbeat_data["players"][puuid] = self._build_heartbeat_player(
+                player, names, partyNum, playerRank, ppstats, loadouts_data
+            )
             
-            # FIX: Also fix the stats saving part
+            # Save stats
             self.stats.save_data({
-                player["Subject"]: {
-                    "name": names[player["Subject"]],
-                    "agent": agent_name,  # Use the safe lookup here too
+                puuid: {
+                    "name": names[puuid],
+                    "agent": agent_name,
                     "map": self.current_map,
                     "rank": playerRank["rank"],
                     "rr": playerRank["rr"],
-                    "match_id": self.coregame.match_id,
+                    "match_id": match_id,
                     "epoch": time.time()
                 }
             })
         
         return table_data, metadata, heartbeat_data
-    
-    def process_pregame_state_streaming(self, presence, heartbeat_data):
+
+    def process_pregame_state(self, presence, heartbeat_data):
         table_data = []
-        metadata = {"state": "PREGAME"}
+        metadata = {"state": "PREGAME", "clear_table": True}
         
         pregame_stats = self.pregame.get_pregame_stats()
         if not pregame_stats:
             return table_data, metadata, heartbeat_data
         
-        if self.cfg.get_feature_flag("starting_side") and pregame_stats:
+        # Cache match ID for ingame reuse
+        self.last_match_id = self.pregame.get_pregame_match_id()
+        
+        if self.cfg.get_feature_flag("starting_side"):
             team_id = pregame_stats.get("AllyTeam", {}).get("TeamID")
             if team_id:
-                starting_side = "Attacker" if team_id == "Red" else "Defender"
-                metadata["starting_side"] = starting_side
-                self.team_side = starting_side
+                metadata["starting_side"] = "Attacker" if team_id == "Red" else "Defender"
         
-        metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
         
         Players = pregame_stats["AllyTeam"]["Players"]
@@ -670,57 +592,62 @@ class VRYWorkerThread(QThread):
         partyMembersList = [a["Subject"] for a in partyMembers]
         partyOBJ = self.menu.get_party_json(self.namesClass.get_players_puuid(Players), presence)
         
-        Players.sort(key=lambda p: p["PlayerIdentity"].get("AccountLevel"), reverse=True)
-        
         partyIcons = {}
         partyCount = 0
+        
+        teams = pregame_stats.get("Teams", [])
+        team_id = teams[0]["TeamID"] if teams else None
+        
+        # Clear and rebuild pregame cache
+        self.pregame_players_cache.clear()
         
         for player in Players:
             if not self.running or self.freeze_table:
                 break
-                
-            party_icon = ""
-            partyNum = 0
+            
+            puuid = player["Subject"]
+            
+            party_icon, partyNum = "", 0
             for party in partyOBJ:
-                if player["Subject"] in partyOBJ[party]:
+                if puuid in partyOBJ[party]:
                     if party not in partyIcons:
                         partyIcons[party] = PARTYICONLIST[partyCount]
-                        party_icon = PARTYICONLIST[partyCount]
-                        partyNum = partyCount + 1
-                    else:
-                        party_icon = partyIcons[party]
-                    partyCount += 1
+                        partyCount += 1
+                    party_icon = partyIcons[party]
+                    partyNum = partyCount
             
-            # FIX: Safe agent lookup with fallback
-            character_id = player["CharacterID"].lower()
-            agent_name = self.agent_dict.get(character_id, "None")
-            if agent_name == "None":
-                self.log(f"Unknown agent ID: {character_id}")
+            agent_name = self.agent_dict.get(player["CharacterID"].lower(), "Unknown")
             
-            playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
-            previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
-            ppstats = self.pstats.get_stats(player["Subject"])
-            teams = pregame_stats.get("Teams", [])
-            team_id = teams[0]["TeamID"] if teams else None
-
+            playerRank = self.rank.get_rank(puuid, self.seasonID)
+            previousPlayerRank = self.rank.get_rank(puuid, self.previousSeasonID)
+            ppstats = self.pstats.get_stats(puuid)
+            
+            # Cache for ingame reuse
+            self.pregame_players_cache[puuid] = {
+                "rank_data": playerRank,
+                "prev_rank_data": previousPlayerRank,
+                "stats": ppstats,
+                "name": names[puuid]
+            }
+            
             row_data = {
-                "puuid": player["Subject"],  # Added for heartbeat
+                "puuid": puuid,
                 "party": party_icon,
-                "agent": agent_name,  # Use the safe lookup
+                "agent": agent_name,
                 "agent_state": player["CharacterSelectionState"],
-                "name": names[player["Subject"]],
+                "name": names[puuid],
                 "incognito": player["PlayerIdentity"]["Incognito"],
                 "team": team_id,
-                "is_self": player["Subject"] == self.Requests.puuid,
-                "is_party": player["Subject"] in partyMembersList,
+                "is_self": puuid == self.Requests.puuid,
+                "is_party": puuid in partyMembersList,
                 "skin": "",
                 "rank": NUMBERTORANKS[playerRank["rank"]],
-                "rank_number": playerRank["rank"],  # Added for heartbeat
+                "rank_number": playerRank["rank"],
                 "rank_act": self.seasonActEp.get("act"),
                 "rank_ep": self.seasonActEp.get("episode"),
                 "rr": playerRank["rr"],
                 "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
-                "peak_rank_number": playerRank["peakrank"],  # Added for heartbeat
+                "peak_rank_number": playerRank["peakrank"],
                 "peak_act": playerRank.get("peakrankact"),
                 "peak_ep": playerRank.get("peakrankep"),
                 "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
@@ -742,11 +669,10 @@ class VRYWorkerThread(QThread):
             
             table_data.append(row_data)
             
-            # Add player data to heartbeat
-            heartbeat_data["players"][player["Subject"]] = {
-                "name": names[player["Subject"]],
-                "partyNumber": partyNum if party_icon != "" else 0,
-                "agent": self.agent_dict.get(player["CharacterID"].lower(), "Unknown"),
+            heartbeat_data["players"][puuid] = {
+                "name": names[puuid],
+                "partyNumber": partyNum if party_icon else 0,
+                "agent": agent_name,
                 "rank": playerRank["rank"],
                 "peakRank": playerRank["peakrank"],
                 "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
@@ -758,106 +684,172 @@ class VRYWorkerThread(QThread):
             }
         
         return table_data, metadata, heartbeat_data
-    
-    def process_menu_state_streaming(self, presence, heartbeat_data):
+
+    def process_menu_state(self, presence, heartbeat_data):
         table_data = []
-        metadata = {"state": "MENUS"}
+        metadata = {"state": "MENUS", "clear_table": True}
         
-        metadata["clear_table"] = True
         self.table_update_signal.emit([], metadata)
         
         Players = self.menu.get_party_members(self.Requests.puuid, presence)
         names = self.namesClass.get_names_from_puuids(Players)
         
-        Players.sort(key=lambda p: p["PlayerIdentity"].get("AccountLevel"), reverse=True)
-        
-        seen = []
+        seen = set()
         for player in Players:
-            if player["Subject"] not in seen and not self.freeze_table:
-                playerRank = self.rank.get_rank(player["Subject"], self.seasonID)
-                previousPlayerRank = self.rank.get_rank(player["Subject"], self.previousSeasonID)
-                ppstats = self.pstats.get_stats(player["Subject"])
-                
-                row_data = {
-                    "puuid": player["Subject"],  # Added for heartbeat
-                    "party": PARTYICONLIST[0],
-                    "agent": "",
-                    "name": names[player["Subject"]],
-                    "incognito": False,
-                    "is_self": player["Subject"] == self.Requests.puuid,
-                    "is_party": True,
-                    "skin": "",
-                    "rank": NUMBERTORANKS[playerRank["rank"]],
-                    "rank_number": playerRank["rank"],  # Added for heartbeat
-                    "rank_act": self.seasonActEp.get("act"),
-                    "rank_ep": self.seasonActEp.get("episode"),
-                    "rr": playerRank["rr"],
-                    "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
-                    "peak_rank_number": playerRank["peakrank"],  # Added for heartbeat
-                    "peak_act": playerRank.get("peakrankact"),
-                    "peak_ep": playerRank.get("peakrankep"),
-                    "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
-                    "previous_act": self.previousSeasonActEp.get("act"),
-                    "previous_ep": self.previousSeasonActEp.get("episode"),
-                    "leaderboard": playerRank["leaderboard"],
-                    "hs": ppstats["hs"],
-                    "kd": ppstats["kd"],
-                    "wr": playerRank["wr"],
-                    "games": playerRank['numberofgames'],
-                    "level": player["PlayerIdentity"].get("AccountLevel"),
-                    "hide_level": False,
-                    "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
-                    "afk_penalty": ppstats.get("AFKPenalty", "N/A")
-                }
-                
-                if not self.freeze_table:
-                    self.table_row_signal.emit(row_data, metadata)
-                
-                table_data.append(row_data)
-                
-                # Add player data to heartbeat
-                heartbeat_data["players"][player["Subject"]] = {
-                    "name": names[player["Subject"]],
-                    "rank": playerRank["rank"],
-                    "peakRank": playerRank["peakrank"],
-                    "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
-                    "level": player["PlayerIdentity"].get("AccountLevel", 0),
-                    "rr": playerRank["rr"],
-                    "kd": ppstats["kd"],
-                    "headshotPercentage": ppstats["hs"],
-                    "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
-                }
-                
-                seen.append(player["Subject"])
+            puuid = player["Subject"]
+            if puuid in seen or self.freeze_table:
+                continue
+            seen.add(puuid)
+            
+            playerRank = self.rank.get_rank(puuid, self.seasonID)
+            previousPlayerRank = self.rank.get_rank(puuid, self.previousSeasonID)
+            ppstats = self.pstats.get_stats(puuid)
+            
+            row_data = {
+                "puuid": puuid,
+                "party": PARTYICONLIST[0],
+                "agent": "",
+                "name": names[puuid],
+                "incognito": False,
+                "is_self": puuid == self.Requests.puuid,
+                "is_party": True,
+                "skin": "",
+                "rank": NUMBERTORANKS[playerRank["rank"]],
+                "rank_number": playerRank["rank"],
+                "rank_act": self.seasonActEp.get("act"),
+                "rank_ep": self.seasonActEp.get("episode"),
+                "rr": playerRank["rr"],
+                "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
+                "peak_rank_number": playerRank["peakrank"],
+                "peak_act": playerRank.get("peakrankact"),
+                "peak_ep": playerRank.get("peakrankep"),
+                "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
+                "previous_act": self.previousSeasonActEp.get("act"),
+                "previous_ep": self.previousSeasonActEp.get("episode"),
+                "leaderboard": playerRank["leaderboard"],
+                "hs": ppstats["hs"],
+                "kd": ppstats["kd"],
+                "wr": playerRank["wr"],
+                "games": playerRank['numberofgames'],
+                "level": player["PlayerIdentity"].get("AccountLevel"),
+                "hide_level": False,
+                "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
+                "afk_penalty": ppstats.get("AFKPenalty", "N/A")
+            }
+            
+            if not self.freeze_table:
+                self.table_row_signal.emit(row_data, metadata)
+            
+            table_data.append(row_data)
+            
+            heartbeat_data["players"][puuid] = {
+                "name": names[puuid],
+                "rank": playerRank["rank"],
+                "peakRank": playerRank["peakrank"],
+                "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
+                "level": player["PlayerIdentity"].get("AccountLevel", 0),
+                "rr": playerRank["rr"],
+                "kd": ppstats["kd"],
+                "headshotPercentage": ppstats["hs"],
+                "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
+            }
         
         return table_data, metadata, heartbeat_data
+
+    def _build_row_data(self, player, names, party_icon, agent_name, loadouts,
+                        playerRank, previousPlayerRank, ppstats, partyMembersList, allyTeam):
+        puuid = player["Subject"]
+        return {
+            "puuid": puuid,
+            "party": party_icon,
+            "agent": agent_name,
+            "name": names[puuid],
+            "incognito": player["PlayerIdentity"]["Incognito"],
+            "team": player["TeamID"],
+            "ally_team": allyTeam,
+            "is_self": puuid == self.Requests.puuid,
+            "is_party": puuid in partyMembersList,
+            "skin": loadouts.get(puuid, ""),
+            "rank": NUMBERTORANKS[playerRank["rank"]],
+            "rank_number": playerRank["rank"],
+            "rank_act": self.seasonActEp.get("act"),
+            "rank_ep": self.seasonActEp.get("episode"),
+            "rr": playerRank["rr"],
+            "peak_rank": NUMBERTORANKS[playerRank["peakrank"]],
+            "peak_rank_number": playerRank["peakrank"],
+            "peak_act": playerRank.get("peakrankact"),
+            "peak_ep": playerRank.get("peakrankep"),
+            "previous_rank": NUMBERTORANKS[previousPlayerRank["rank"]],
+            "previous_act": self.previousSeasonActEp.get("act"),
+            "previous_ep": self.previousSeasonActEp.get("episode"),
+            "leaderboard": playerRank["leaderboard"],
+            "hs": ppstats["hs"],
+            "kd": ppstats["kd"],
+            "wr": playerRank["wr"],
+            "games": playerRank['numberofgames'],
+            "level": player["PlayerIdentity"].get("AccountLevel"),
+            "hide_level": player["PlayerIdentity"]["HideAccountLevel"],
+            "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
+            "afk_penalty": ppstats.get("AFKPenalty", "N/A")
+        }
+
+    def _build_heartbeat_player(self, player, names, partyNum, playerRank, ppstats, loadouts_data):
+        puuid = player["Subject"]
+        return {
+            "puuid": puuid,
+            "name": names[puuid],
+            "partyNumber": partyNum,
+            "agent": self.agent_dict.get(player["CharacterID"].lower(), "Unknown"),
+            "rank": playerRank["rank"],
+            "peakRank": playerRank["peakrank"],
+            "peakRankAct": f"{playerRank.get('peakrankep', '')}a{playerRank.get('peakrankact', '')}",
+            "rr": playerRank["rr"],
+            "kd": ppstats["kd"],
+            "headshotPercentage": ppstats["hs"],
+            "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
+            "level": player["PlayerIdentity"].get("AccountLevel", 0),
+            "agentImgLink": loadouts_data.get("Players", {}).get(puuid, {}).get("Agent"),
+            "team": loadouts_data.get("Players", {}).get(puuid, {}).get("Team"),
+            "sprays": loadouts_data.get("Players", {}).get(puuid, {}).get("Sprays"),
+            "title": loadouts_data.get("Players", {}).get(puuid, {}).get("Title"),
+            "playerCard": loadouts_data.get("Players", {}).get(puuid, {}).get("PlayerCard"),
+            "weapons": loadouts_data.get("Players", {}).get(puuid, {}).get("Weapons"),
+        }
     
     def stop(self):
+        """Gracefully stop the worker thread"""
         self.running = False
+        self._shutdown_event.set()
         
-        if self.loop and not self.loop.is_closed():
-            try:
-                pending = asyncio.all_tasks(self.loop)
-                for task in pending:
-                    task.cancel()
-                self.loop.stop()
-                self.loop.close()
-            except Exception:
-                pass
+        # Signal websocket to close
+        if hasattr(self, "Wss") and self.Wss:
+            self.Wss.request_shutdown()
         
+        # Give websocket time to close gracefully
+        time.sleep(0.5)
+        
+        # Cleanup resources
         try:
             if hasattr(self, "Wss") and self.Wss:
                 self.Wss.close()
         except Exception:
             pass
+        
         try:
             if hasattr(self, "Server") and self.Server:
                 self.Server.stop_server()
         except Exception:
             pass
+        
         try:
             if hasattr(self, "rpc") and self.rpc:
                 self.rpc.close()
+        except Exception:
+            pass
+        
+        try:
+            if hasattr(self, "loadoutsClass") and self.loadoutsClass:
+                self.loadoutsClass.close()
         except Exception:
             pass
 
@@ -867,7 +859,6 @@ class VRYTableWidget(QTableWidget):
     def __init__(self):
         super().__init__()
         self.current_theme = THEMES["Dark"]
-        self.frozen_data = []
         self.is_frozen = False
         self.setup_table()
         
@@ -877,32 +868,15 @@ class VRYTableWidget(QTableWidget):
                   "Peak", "Previous", "Pos.", "HS%", "WR%", "K/D", "Level", "ΔRR"]
         self.setHorizontalHeaderLabels(headers)
         
-        header_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
-        self.horizontalHeader().setFont(header_font)
+        self.horizontalHeader().setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         
         header = self.horizontalHeader()
         for col in range(self.columnCount()):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
 
-        stretch_columns = [2, 3, 4, 6, 7, 10]
-        for col in stretch_columns:
+        for col in [2, 3, 4, 6, 7, 10]:
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
 
-        self.setColumnWidth(0, 50)
-        self.setColumnWidth(1, 80)
-        self.setColumnWidth(2, 140)
-        self.setColumnWidth(3, 140)
-        self.setColumnWidth(4, 120)
-        self.setColumnWidth(5, 45)
-        self.setColumnWidth(6, 120)
-        self.setColumnWidth(7, 120)
-        self.setColumnWidth(8, 45)
-        self.setColumnWidth(9, 55)
-        self.setColumnWidth(10, 75)
-        self.setColumnWidth(11, 55)
-        self.setColumnWidth(12, 55)
-        self.setColumnWidth(13, 60)
-        
         self.setSortingEnabled(True)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.verticalHeader().setVisible(False)
@@ -910,12 +884,6 @@ class VRYTableWidget(QTableWidget):
 
     def apply_theme(self, theme):
         self.current_theme = theme
-        self.current_theme_name = theme.name
-        
-        # Send theme update to mobile
-        if hasattr(self, 'worker_thread') and self.worker_thread and hasattr(self.worker_thread, 'server'):
-            self.worker_thread.server.update_theme(theme.name)
-            
         self.setStyleSheet(f"""
             QTableWidget {{
                 background-color: {theme.table_bg};
@@ -932,9 +900,6 @@ class VRYTableWidget(QTableWidget):
             QTableWidget::item:selected {{
                 background-color: {theme.selection};
             }}
-            QTableWidget::item:hover {{
-                background-color: {theme.alternate};
-            }}
             QHeaderView::section {{
                 background-color: {theme.header};
                 color: {theme.table_text};
@@ -944,63 +909,16 @@ class VRYTableWidget(QTableWidget):
                 border-bottom: 2px solid {theme.accent};
                 font-weight: bold;
             }}
-            QHeaderView::section:hover {{
-                background-color: {theme.selection};
-            }}
-            QTableCornerButton::section {{
-                background-color: {theme.header};
-                border: none;
-            }}
         """)
     
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-
-        total_width = self.viewport().width()
-        weights = {
-            2: 3,
-            3: 2,
-            4: 2,
-            6: 2,
-            7: 2,
-            10: 1
-        }
-
-        total_weight = sum(weights.values())
-
-        for col, w in weights.items():
-            self.setColumnWidth(col, int(total_width * (w / total_weight)))
-
-        compact_cols = [0, 1, 5, 8, 9, 11, 12, 13]
-        for col in compact_cols:
-            self.resizeColumnToContents(col)
-            
-            if self.columnWidth(col) < 40:
-                self.setColumnWidth(col, 40)
-
     def freeze_table(self, freeze):
         self.is_frozen = freeze
-        if freeze:
-            self.frozen_data = []
-            for row in range(self.rowCount()):
-                row_data = []
-                for col in range(self.columnCount()):
-                    item = self.item(row, col)
-                    if item:
-                        row_data.append((item.text(), item.foreground()))
-                    else:
-                        row_data.append((None, None))
-                self.frozen_data.append(row_data)
-        else:
-            self.frozen_data = []
     
     def add_row_streaming(self, row_data, metadata):
         if self.is_frozen:
             return
-            
         if metadata.get("clear_table"):
             self.setRowCount(0)
-            
         row_position = self.rowCount()
         self.insertRow(row_position)
         self._populate_row(row_position, row_data, metadata)
@@ -1008,31 +926,15 @@ class VRYTableWidget(QTableWidget):
     def update_table(self, data, metadata):
         if self.is_frozen:
             return
-            
         self.setRowCount(0)
-        
         for row_data in data:
             row_position = self.rowCount()
             self.insertRow(row_position)
             self._populate_row(row_position, row_data, metadata)
-        
-        self.resizeColumnsToContents()
         self._update_column_visibility(metadata)
     
     def _populate_row(self, row_position, row_data, metadata):
-        def safe_float(value, default=0.0):
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                return default
-
-        def safe_int(value, default=0):
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                return default
-
-        def parse_and_create_item(raw):
+        def parse_ansi(raw):
             if raw is None:
                 raw = ""
             raw_text = str(raw)
@@ -1043,240 +945,126 @@ class VRYTableWidget(QTableWidget):
                 try:
                     r, g, b = map(int, m.groups())
                     item.setForeground(QColor(r, g, b))
-                    return item, True
                 except Exception:
                     pass
-            return item, False
+            return item
         
-        def format_rank_with_episode(rank_text, act, ep):
+        def format_rank(rank_text, act, ep):
             if not rank_text or "Unranked" in str(rank_text):
                 return rank_text
-            clean_rank = ANSI_ANY_RE.sub("", str(rank_text))
-            if act and ep:
-                return f"{clean_rank} {ep}A{act}"
-            return rank_text
+            clean = ANSI_ANY_RE.sub("", str(rank_text))
+            return f"{clean} {ep}A{act}" if act and ep else rank_text
 
-        privacy_enabled = bool(metadata.get('incognito_privacy', True))
+        privacy = metadata.get('incognito_privacy', True)
+        is_self = row_data.get("is_self", False)
+        is_party = row_data.get("is_party", False)
+        incognito = row_data.get("incognito", False)
 
-        # column 0: party
-        party_item, _ = parse_and_create_item(row_data.get("party", ""))
-        party_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 0, party_item)
+        # Party
+        item = parse_ansi(row_data.get("party", ""))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 0, item)
 
-        # column 1: agent
-        agent_item, agent_colored = parse_and_create_item(row_data.get("agent", ""))
-        if not agent_colored and "agent_state" in row_data:
-            if row_data["agent_state"] == "locked":
-                agent_item.setForeground(QColor(255, 255, 255))
-            elif row_data["agent_state"] == "selected":
-                agent_item.setForeground(QColor(128, 128, 128))
+        # Agent
+        item = parse_ansi(row_data.get("agent", ""))
+        if "agent_state" in row_data:
+            states = {"locked": (255, 255, 255), "selected": (128, 128, 128)}
+            if row_data["agent_state"] in states:
+                item.setForeground(QColor(*states[row_data["agent_state"]]))
             else:
-                agent_item.setForeground(QColor(54, 53, 51))
-        agent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 1, agent_item)
+                item.setForeground(QColor(54, 53, 51))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 1, item)
 
-        # column 2: name
-        name_raw = row_data.get("name", "")
-        incog_flag = bool(row_data.get("incognito", False))
-        is_self = bool(row_data.get("is_self", False))
-        is_party = bool(row_data.get("is_party", False))
-
-        if incog_flag and privacy_enabled and not is_self and not is_party:
-            name_item = QTableWidgetItem("Incognito")
-            font = QFont()
-            font.setBold(True)
-            name_item.setFont(font)
-            name_item.setForeground(QColor(128, 0, 0))
-            skip_team_coloring = True
+        # Name
+        if incognito and privacy and not is_self and not is_party:
+            item = QTableWidgetItem("Incognito")
+            item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            item.setForeground(QColor(128, 0, 0))
         else:
-            display_name = ("*" + str(name_raw)) if (incog_flag and not privacy_enabled) else str(name_raw)
-            name_item, name_colored = parse_and_create_item(display_name)
-            skip_team_coloring = False
-
-        if not skip_team_coloring and not name_colored:
+            name = ("*" + str(row_data.get("name", ""))) if incognito and not privacy else str(row_data.get("name", ""))
+            item = parse_ansi(name)
             if is_self:
-                name_item.setForeground(QColor(255, 215, 0))
+                item.setForeground(QColor(255, 215, 0))
             elif is_party:
-                name_item.setForeground(QColor(76, 151, 237))
+                item.setForeground(QColor(76, 151, 237))
             elif "team" in row_data and "ally_team" in row_data:
                 if row_data["team"] == row_data.get("ally_team"):
-                    name_item.setForeground(QColor(0, 255, 127))
+                    item.setForeground(QColor(0, 255, 127))
                 else:
-                    name_item.setForeground(QColor(255, 69, 0))
+                    item.setForeground(QColor(255, 69, 0))
+        self.setItem(row_position, 2, item)
 
-        self.setItem(row_position, 2, name_item)
+        # Skin
+        self.setItem(row_position, 3, parse_ansi(row_data.get("skin", "")))
 
-        # remaining columns
-        skin_item, _ = parse_and_create_item(row_data.get("skin", ""))
-        self.setItem(row_position, 3, skin_item)
+        # Rank
+        rank_text = format_rank(row_data.get("rank", ""), row_data.get("rank_act"), row_data.get("rank_ep"))
+        self.setItem(row_position, 4, parse_ansi(rank_text))
 
-        rank_text = format_rank_with_episode(
-            row_data.get("rank", ""),
-            row_data.get("rank_act"),
-            row_data.get("rank_ep")
-        )
-        rank_item, _ = parse_and_create_item(rank_text)
-        self.setItem(row_position, 4, rank_item)
+        # RR
+        item = QTableWidgetItem(str(row_data.get("rr", 0)))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 5, item)
 
-        rr_val = safe_int(row_data.get("rr", 0))
-        rr_item = QTableWidgetItem(str(rr_val))
-        rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 5, rr_item)
+        # Peak
+        peak_text = format_rank(row_data.get("peak_rank", ""), row_data.get("peak_act"), row_data.get("peak_ep"))
+        self.setItem(row_position, 6, parse_ansi(peak_text))
 
-        peak_text = format_rank_with_episode(
-            row_data.get("peak_rank", ""),
-            row_data.get("peak_act"),
-            row_data.get("peak_ep")
-        )
-        peak_item, _ = parse_and_create_item(peak_text)
-        self.setItem(row_position, 6, peak_item)
+        # Previous
+        prev_text = format_rank(row_data.get("previous_rank", ""), row_data.get("previous_act"), row_data.get("previous_ep"))
+        self.setItem(row_position, 7, parse_ansi(prev_text))
 
-        prev_text = format_rank_with_episode(
-            row_data.get("previous_rank", ""),
-            row_data.get("previous_act"),
-            row_data.get("previous_ep")
-        )
-        prev_item, _ = parse_and_create_item(prev_text)
-        self.setItem(row_position, 7, prev_item)
+        # Leaderboard
+        lb = row_data.get("leaderboard", 0)
+        item = QTableWidgetItem(str(lb) if lb and lb > 0 else "")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 8, item)
 
-        lb_val = safe_int(row_data.get("leaderboard", 0))
-        lb_item = QTableWidgetItem(str(lb_val) if lb_val > 0 else "")
-        lb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 8, lb_item)
+        # HS%
+        hs = row_data.get("hs", "N/A")
+        item = QTableWidgetItem(f"{float(hs):.1f}%" if hs != "N/A" else "N/A")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 9, item)
 
-        hs_val = row_data.get("hs", "N/A")
-        if hs_val != "N/A":
-            hs_display = f"{safe_float(hs_val):.1f}%"
+        # WR%
+        wr = row_data.get("wr", "N/a")
+        games = row_data.get("games", 0)
+        item = QTableWidgetItem(f"{wr}% ({games})" if wr != "N/a" else f"N/A ({games})")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 10, item)
+
+        # K/D
+        kd = row_data.get("kd", "N/A")
+        item = QTableWidgetItem(f"{float(kd):.2f}" if kd != "N/A" else "N/A")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 11, item)
+
+        # Level
+        level = row_data.get("level", "")
+        if row_data.get("hide_level") and not is_self and not is_party and privacy:
+            level = ""
+        item = QTableWidgetItem(str(level))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 12, item)
+
+        # ΔRR
+        earned = row_data.get("earned_rr", "N/A")
+        afk = row_data.get("afk_penalty", "N/A")
+        if earned != "N/A" and afk != "N/A":
+            text = f"{earned:+d}" + (f" ({afk})" if afk != 0 else "")
+            item = QTableWidgetItem(text)
+            item.setForeground(QColor(0, 255, 0) if earned > 0 else QColor(255, 0, 0) if earned < 0 else QColor(255, 255, 255))
         else:
-            hs_display = "N/A"
-        hs_item = QTableWidgetItem(hs_display)
-        hs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 9, hs_item)
-
-        wr_val = row_data.get("wr", "N/a")
-        games_val = safe_int(row_data.get("games", 0))
-        if wr_val != "N/a":
-            wr_display = f"{safe_int(wr_val)}% ({games_val})"
-        else:
-            wr_display = f"N/A ({games_val})"
-        wr_item = QTableWidgetItem(wr_display)
-        wr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 10, wr_item)
-
-        kd_val = row_data.get("kd", "N/A")
-        if kd_val != "N/A":
-            kd_display = f"{safe_float(kd_val):.2f}"
-        else:
-            kd_display = "N/A"
-        kd_item = QTableWidgetItem(kd_display)
-        kd_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 11, kd_item)
-
-        level_val = row_data.get("level", "")
-        # Only hide level if ALL conditions are met:
-        # 1. Player has level hiding enabled
-        # 2. Not current user
-        # 3. Not in party
-        # 4. Incognito privacy is ON
-        if (row_data.get("hide_level") and 
-            not is_self and 
-            not is_party and 
-            metadata.get('incognito_privacy', True)):
-            level_val = ""
-        level_item = QTableWidgetItem(str(level_val))
-        
-        level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 12, level_item)
-
-        earned_rr = row_data.get("earned_rr", "N/A")
-        afk_penalty = row_data.get("afk_penalty", "N/A")
-        
-        if earned_rr != "N/A" and afk_penalty != "N/A":
-            earned_display = f"{earned_rr:+d}"
-            if afk_penalty != 0:
-                earned_display += f" ({afk_penalty})"
-            rr_item = QTableWidgetItem(earned_display)
-            if earned_rr > 0:
-                rr_item.setForeground(QColor(0, 255, 0))
-            elif earned_rr < 0:
-                rr_item.setForeground(QColor(255, 0, 0))
-        else:
-            rr_item = QTableWidgetItem("")
-        
-        rr_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setItem(row_position, 13, rr_item)
+            item = QTableWidgetItem("")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setItem(row_position, 13, item)
     
     def _update_column_visibility(self, metadata):
-        if metadata.get("state") == "MENUS":
-            self.setColumnHidden(0, True)
-            self.setColumnHidden(1, True)
-            self.setColumnHidden(3, True)
-        else:
-            self.setColumnHidden(0, False)
-            self.setColumnHidden(1, False)
-            self.setColumnHidden(3, metadata.get("state") == "PREGAME")
-
-
-class ThemeCustomizationDialog(QDialog):
-    
-    def __init__(self, parent=None, current_theme=None):
-        super().__init__(parent)
-        self.setWindowTitle("Customize Theme")
-        self.setModal(True)
-        self.current_theme = current_theme or THEMES["Dark"]
-        
-        theme_attrs = {k: v for k, v in vars(self.current_theme).items() if k != 'name'}
-        self.custom_theme = Theme("Custom", **theme_attrs)
-        
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout()
-        
-        color_grid = QGridLayout()
-        
-        self.color_buttons = {}
-        color_properties = [
-            ("Background", "background"),
-            ("Text", "text"),
-            ("Border", "border"),
-            ("Selection", "selection"),
-            ("Table Background", "table_bg"),
-            ("Table Text", "table_text"),
-            ("Accent", "accent")
-        ]
-        
-        for i, (label, prop) in enumerate(color_properties):
-            color_grid.addWidget(QLabel(label + ":"), i, 0)
-            
-            btn = QPushButton()
-            color_value = getattr(self.custom_theme, prop)
-            btn.setStyleSheet(f"background-color: {color_value}; border: 1px solid #000;")
-            btn.clicked.connect(lambda checked, p=prop, b=btn: self.choose_color(p, b))
-            self.color_buttons[prop] = btn
-            
-            color_grid.addWidget(btn, i, 1)
-        
-        layout.addLayout(color_grid)
-        
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-        
-        self.setLayout(layout)
-    
-    def choose_color(self, property_name, button):
-        current_color = QColor(getattr(self.custom_theme, property_name))
-        color = QColorDialog.getColor(current_color, self, f"Choose {property_name} color")
-        
-        if color.isValid():
-            hex_color = color.name()
-            setattr(self.custom_theme, property_name, hex_color)
-            button.setStyleSheet(f"background-color: {hex_color}; border: 1px solid #000;")
-    
-    def get_custom_theme(self):
-        return self.custom_theme
+        state = metadata.get("state", "")
+        self.setColumnHidden(0, state == "MENUS")
+        self.setColumnHidden(1, state == "MENUS")
+        self.setColumnHidden(3, state in ("MENUS", "PREGAME"))
 
 
 class VRYMainWindow(QMainWindow):
@@ -1284,7 +1072,7 @@ class VRYMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.settings = QSettings("VRY", "VRY - UI v2")
+        self.settings = QSettings("VRY", "VRY-UI-v2")
         self.current_theme = THEMES["Dark"]
         self.worker_thread = None
         self.player_table_data = []
@@ -1295,48 +1083,33 @@ class VRYMainWindow(QMainWindow):
         self.config = Config(None)
         self.show_resource_warning = self.config.get_feature_flag("show_resource_warning")
         
-        self.current_theme_name = "Dark"
-        
         self.init_ui()
         self.load_settings()
         
         if PSUTIL_AVAILABLE and self.show_resource_warning:
             self.resource_timer = QTimer()
             self.resource_timer.timeout.connect(self.monitor_resources)
-            self.resource_timer.start(30000)
+            self.resource_timer.start(60000)  # Check every minute
         
         QTimer.singleShot(100, self.start_vry)
     
     def monitor_resources(self):
-        if not PSUTIL_AVAILABLE or not self.show_resource_warning:
+        if not PSUTIL_AVAILABLE:
             return
-            
         try:
-            memory = psutil.virtual_memory()
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            
-            if memory.percent > 90 or cpu_percent > 95:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Icon.Warning)
-                msg.setWindowTitle("High Resource Usage")
-                msg.setText(
-                    f"System resources are running low:\n"
-                    f"Memory Usage: {memory.percent:.1f}%\n"
-                    f"CPU Usage: {cpu_percent:.1f}%"
-                )
-                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                msg.exec()
-                
-        except Exception as e:
-            print(f"Resource monitoring error: {e}")
+            mem = psutil.virtual_memory()
+            cpu = psutil.cpu_percent(interval=0.1)
+            if mem.percent > 90 or cpu > 95:
+                QMessageBox.warning(self, "High Resource Usage",
+                    f"Memory: {mem.percent:.1f}%\nCPU: {cpu:.1f}%")
+        except Exception:
+            pass
     
     def init_ui(self):
-        self.setWindowTitle("VRY - UI v2.13")
+        self.setWindowTitle("VRY - UI v2.14")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
-        
-        app_font = QFont("Segoe UI", 9)
-        self.setFont(app_font)
+        self.setFont(QFont("Segoe UI", 9))
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1350,6 +1123,7 @@ class VRYMainWindow(QMainWindow):
         self.tabs.setDocumentMode(True)
         main_layout.addWidget(self.tabs)
         
+        # VRY Tab
         vry_widget = QWidget()
         vry_layout = QVBoxLayout(vry_widget)
         vry_layout.setContentsMargins(10, 10, 10, 10)
@@ -1361,7 +1135,6 @@ class VRYMainWindow(QMainWindow):
         self.status_label = QLabel("Status: Initializing...")
         self.status_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         status_layout.addWidget(self.status_label)
-        
         status_layout.addStretch()
         
         self.freeze_btn = QPushButton("Freeze Table")
@@ -1382,9 +1155,9 @@ class VRYMainWindow(QMainWindow):
         
         self.tabs.addTab(vry_widget, "Players")
         
+        # Console (hidden by default)
         self.console_widget = QWidget()
         console_layout = QVBoxLayout(self.console_widget)
-        
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.console_output.setFont(QFont("Consolas", 9))
@@ -1401,30 +1174,22 @@ class VRYMainWindow(QMainWindow):
         if self.worker_thread:
             self.worker_thread.set_freeze_state(checked)
         
-        if checked:
-            self.freeze_btn.setText("Unfreeze Table")
-            self.freeze_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: #4a90e2;
-                    color: white;
-                    font-weight: bold;
-                }}
-            """)
-            self.status_bar.showMessage("Table frozen - updates paused", 3000)
-        else:
-            self.freeze_btn.setText("Freeze Table")
-            self.freeze_btn.setStyleSheet("")
-            self.status_bar.showMessage("Table unfrozen - updates resumed", 3000)
+        self.freeze_btn.setText("Unfreeze Table" if checked else "Freeze Table")
+        self.freeze_btn.setStyleSheet(
+            "QPushButton { background-color: #4a90e2; color: white; font-weight: bold; }" if checked else ""
+        )
+        self.status_bar.showMessage(f"Table {'frozen' if checked else 'unfrozen'}", 3000)
     
     def create_menu_bar(self):
         menubar = self.menuBar()
         
+        # File menu
         file_menu = menubar.addMenu('File')
         
-        refresh_action = QAction('Refresh Data', self)
-        refresh_action.setShortcut('F5')
-        refresh_action.triggered.connect(self.refresh_data)
-        file_menu.addAction(refresh_action)
+        refresh = QAction('Refresh Data', self)
+        refresh.setShortcut('F5')
+        refresh.triggered.connect(self.refresh_data)
+        file_menu.addAction(refresh)
         
         file_menu.addSeparator()
         
@@ -1433,23 +1198,17 @@ class VRYMainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
+        # View menu
         view_menu = menubar.addMenu('View')
         
         theme_menu = view_menu.addMenu('Theme')
-        
         self.theme_group = []
-        for theme_name in THEMES.keys():
-            action = QAction(theme_name, self)
+        for name in THEMES:
+            action = QAction(name, self)
             action.setCheckable(True)
-            action.triggered.connect(lambda checked, t=theme_name: self.change_theme(t))
+            action.triggered.connect(lambda c, t=name: self.change_theme(t))
             theme_menu.addAction(action)
             self.theme_group.append(action)
-        
-        theme_menu.addSeparator()
-        
-        custom_theme_action = QAction('Customize...', self)
-        custom_theme_action.triggered.connect(self.customize_theme)
-        theme_menu.addAction(custom_theme_action)
         
         view_menu.addSeparator()
         
@@ -1471,201 +1230,47 @@ class VRYMainWindow(QMainWindow):
         
         view_menu.addSeparator()
         
-        settings_menu = view_menu.addMenu('Settings')
-        
-        incognito_action = QAction('Incognito Privacy', self)
-        incognito_action.setCheckable(True)
-        incognito_action.setChecked(True)
-        incognito_action.triggered.connect(self.on_incognito_privacy_changed)
-        settings_menu.addAction(incognito_action)
-        self.incognito_privacy_menu_action = incognito_action
-        
-        settings_menu.addSeparator()
-        
-        verbose_menu = settings_menu.addMenu('Console Verbosity')
-        self.verbose_group = []
-        
-        verbose_levels = [
-            ("Disabled", 0),
-            ("Errors Only", 1),
-            ("Normal", 2),
-            ("Debug", 3)
-        ]
-        
-        for label, level in verbose_levels:
-            action = QAction(label, self)
-            action.setCheckable(True)
-            action.triggered.connect(lambda checked, l=level: self.set_verbose_level(l))
-            verbose_menu.addAction(action)
-            self.verbose_group.append((action, level))
+        self.incognito_action = QAction('Incognito Privacy', self)
+        self.incognito_action.setCheckable(True)
+        self.incognito_action.setChecked(True)
+        self.incognito_action.triggered.connect(self.on_incognito_changed)
+        view_menu.addAction(self.incognito_action)
     
     def apply_theme(self, theme):
         self.current_theme = theme
-        
         self.setStyleSheet(f"""
-            QMainWindow {{
-                background-color: {theme.background};
-            }}
-            QWidget {{
-                background-color: {theme.background};
-                color: {theme.text};
-            }}
-            QTabWidget::pane {{
-                border: 1px solid {theme.border};
-                background-color: {theme.background};
-            }}
-            QTabBar::tab {{
-                background-color: {theme.header};
-                color: {theme.text};
-                padding: 10px 20px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-            }}
-            QTabBar::tab:selected {{
-                background-color: {theme.selection};
-                border-bottom: 3px solid {theme.accent};
-            }}
-            QTabBar::tab:hover {{
-                background-color: {theme.alternate};
-            }}
-            QPushButton {{
-                background-color: {theme.selection};
-                color: {theme.text};
-                border: 1px solid {theme.border};
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {theme.alternate};
-                border: 1px solid {theme.accent};
-            }}
-            QPushButton:pressed {{
-                background-color: {theme.header};
-            }}
-            QLabel {{
-                color: {theme.text};
-                padding: 4px;
-            }}
-            QStatusBar {{
-                background-color: {theme.status_bg};
-                color: white;
-                font-weight: bold;
-            }}
-            QMenuBar {{
-                background-color: {theme.header};
-                color: {theme.text};
-            }}
-            QMenuBar::item:selected {{
-                background-color: {theme.selection};
-            }}
-            QMenu {{
-                background-color: {theme.background};
-                color: {theme.text};
-                border: 1px solid {theme.border};
-            }}
-            QMenu::item:selected {{
-                background-color: {theme.selection};
-            }}
-            QComboBox {{
-                background-color: {theme.selection};
-                color: {theme.text};
-                border: 1px solid {theme.border};
-                padding: 5px;
-                border-radius: 3px;
-            }}
-            QComboBox:hover {{
-                border: 1px solid {theme.accent};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {theme.background};
-                color: {theme.text};
-                selection-background-color: {theme.selection};
-            }}
-            QTextEdit {{
-                background-color: {theme.table_bg};
-                color: {theme.text};
-                border: 1px solid {theme.border};
-            }}
-            QLineEdit {{
-                background-color: {theme.table_bg};
-                color: {theme.text};
-                border: 1px solid {theme.border};
-                padding: 5px;
-                border-radius: 3px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {theme.accent};
-            }}
-            QCheckBox {{
-                color: {theme.text};
-                spacing: 5px;
-            }}
-            QCheckBox::indicator {{
-                width: 18px;
-                height: 18px;
-                border: 2px solid {theme.border};
-                border-radius: 3px;
-                background-color: {theme.table_bg};
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {theme.accent};
-                border-color: {theme.accent};
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: {theme.accent};
-            }}
+            QMainWindow, QWidget {{ background-color: {theme.background}; color: {theme.text}; }}
+            QTabWidget::pane {{ border: 1px solid {theme.border}; }}
+            QTabBar::tab {{ background-color: {theme.header}; color: {theme.text}; padding: 10px 20px; margin-right: 2px; }}
+            QTabBar::tab:selected {{ background-color: {theme.selection}; border-bottom: 3px solid {theme.accent}; }}
+            QPushButton {{ background-color: {theme.selection}; color: {theme.text}; border: 1px solid {theme.border}; padding: 8px 16px; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: {theme.alternate}; border: 1px solid {theme.accent}; }}
+            QStatusBar {{ background-color: {theme.status_bg}; color: white; }}
+            QMenuBar {{ background-color: {theme.header}; color: {theme.text}; }}
+            QMenu {{ background-color: {theme.background}; color: {theme.text}; border: 1px solid {theme.border}; }}
+            QMenu::item:selected {{ background-color: {theme.selection}; }}
+            QTextEdit {{ background-color: {theme.table_bg}; color: {theme.text}; border: 1px solid {theme.border}; }}
+            QLineEdit {{ background-color: {theme.table_bg}; color: {theme.text}; border: 1px solid {theme.border}; padding: 5px; }}
         """)
         
         if hasattr(self, 'player_table'):
             self.player_table.apply_theme(theme)
-        
-        if hasattr(self, 'console_output'):
-            self.console_output.setStyleSheet(f"""
-                QTextEdit {{
-                    background-color: {theme.table_bg};
-                    color: {theme.text};
-                    border: none;
-                }}
-            """)
     
-    def change_theme(self, theme_name):
-        if theme_name in THEMES:
-            self.apply_theme(THEMES[theme_name])
-            self.settings.setValue("theme", theme_name)
-            
+    def change_theme(self, name):
+        if name in THEMES:
+            self.apply_theme(THEMES[name])
+            self.settings.setValue("theme", name)
             for action in self.theme_group:
-                action.setChecked(action.text() == theme_name)
-    
-    def customize_theme(self):
-        dialog = ThemeCustomizationDialog(self, self.current_theme)
-        if dialog.exec():
-            custom_theme = dialog.get_custom_theme()
-            THEMES["Custom"] = custom_theme
-            self.change_theme("Custom")
-    
-    def set_verbose_level(self, level):
-        self.settings.setValue("verbose_level", level)
-        
-        for action, action_level in self.verbose_group:
-            action.setChecked(action_level == level)
-        
-        if self.worker_thread:
-            self.worker_thread.verbose_level = level
+                action.setChecked(action.text() == name)
     
     def toggle_console_tab(self, checked):
         if checked:
             if self.tabs.indexOf(self.console_widget) == -1:
                 self.tabs.addTab(self.console_widget, "Console")
         else:
-            index = self.tabs.indexOf(self.console_widget)
-            if index != -1:
-                self.tabs.removeTab(index)
-        
+            idx = self.tabs.indexOf(self.console_widget)
+            if idx != -1:
+                self.tabs.removeTab(idx)
         self.settings.setValue("show_console", checked)
     
     def toggle_matchloadouts_tab(self, checked):
@@ -1675,127 +1280,77 @@ class VRYMainWindow(QMainWindow):
             else:
                 self.matchloadouts_web = QWebEngineView()
                 self.matchloadouts_web.load(QUrl("https://vry-ui.netlify.app/matchLoadouts"))
-                
             self.tabs.addTab(self.matchloadouts_web, "Match Loadouts")
-            
-            # Notify mobile about loadouts tab activation
-            if hasattr(self, 'worker_thread') and self.worker_thread:
-                self.worker_thread.send_loadouts_data()
-            
         elif not checked and self.matchloadouts_web:
-            index = self.tabs.indexOf(self.matchloadouts_web)
-            if index != -1:
-                self.tabs.removeTab(index)
-            
+            idx = self.tabs.indexOf(self.matchloadouts_web)
+            if idx != -1:
+                self.tabs.removeTab(idx)
             if hasattr(self.matchloadouts_web, 'cleanup'):
                 self.matchloadouts_web.cleanup()
             self.matchloadouts_web = None
-        
         self.settings.setValue("show_matchloadouts", checked)
     
     def toggle_vtl_tab(self, checked):
         if checked and not self.vtl_web:
-            vtl_container = QWidget()
-            vtl_layout = QVBoxLayout(vtl_container)
-            vtl_layout.setContentsMargins(0, 0, 0, 0)
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
             
             search_layout = QHBoxLayout()
             search_layout.setContentsMargins(10, 10, 10, 10)
+            search_layout.addWidget(QLabel("Lookup:"))
             
-            search_label = QLabel("Lookup:")
-            search_layout.addWidget(search_label)
+            self.vtl_search = QLineEdit()
+            self.vtl_search.setPlaceholderText("Username#Tag")
+            self.vtl_search.setMaximumWidth(300)
+            self.vtl_search.returnPressed.connect(self.search_vtl)
+            search_layout.addWidget(self.vtl_search)
             
-            self.vtl_search_input = QLineEdit()
-            self.vtl_search_input.setPlaceholderText("Username#Tag")
-            self.vtl_search_input.setMaximumWidth(300)
-            self.vtl_search_input.returnPressed.connect(self.search_vtl_account)
-            search_layout.addWidget(self.vtl_search_input)
-            
-            search_btn = QPushButton("Search")
-            search_btn.clicked.connect(self.search_vtl_account)
-            search_layout.addWidget(search_btn)
-            
+            btn = QPushButton("Search")
+            btn.clicked.connect(self.search_vtl)
+            search_layout.addWidget(btn)
             search_layout.addStretch()
             
             search_widget = QWidget()
             search_widget.setLayout(search_layout)
-            vtl_layout.addWidget(search_widget, 0)
+            layout.addWidget(search_widget, 0)
             
             self.vtl_web = QWebEngineView()
-
-            placeholder_html = f"""
-            <html>
-            <head>
-            <style>
-                body {{
-                    background-color: {self.current_theme.background};
-                    color: {self.current_theme.text};
-                    font-family: 'Segoe UI', Arial, sans-serif;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                    margin: 0;
-                }}
-                .message {{
-                    font-size: 20px;
-                    font-weight: 500;
-                }}
-            </style>
-            </head>
-            <body>
-                <div class="message">Type and search a User to get started</div>
-            </body>
-            </html>
-            """
-            self.vtl_web.setHtml(placeholder_html)
-
-            vtl_layout.addWidget(self.vtl_web, 1)
+            self.vtl_web.setHtml(f"<html><body style='background:{self.current_theme.background};color:{self.current_theme.text};display:flex;justify-content:center;align-items:center;height:100vh;font-family:Segoe UI'><div>Search a user to get started</div></body></html>")
+            layout.addWidget(self.vtl_web, 1)
             
-            self.vtl_container = vtl_container
-            self.tabs.addTab(self.vtl_container, "VTL.lol")
-            
+            self.vtl_container = container
+            self.tabs.addTab(container, "VTL.lol")
         elif not checked and self.vtl_web:
             if hasattr(self, 'vtl_container'):
-                index = self.tabs.indexOf(self.vtl_container)
-                if index != -1:
-                    self.tabs.removeTab(index)
+                idx = self.tabs.indexOf(self.vtl_container)
+                if idx != -1:
+                    self.tabs.removeTab(idx)
                 self.vtl_container = None
             self.vtl_web = None
-            self.vtl_search_input = None
-        
+            self.vtl_search = None
         self.settings.setValue("show_vtl", checked)
     
-    def search_vtl_account(self):
-        if not self.vtl_search_input or not self.vtl_web:
+    def search_vtl(self):
+        if not self.vtl_search or not self.vtl_web:
             return
-        
-        search_text = self.vtl_search_input.text().strip()
-        if not search_text:
+        text = self.vtl_search.text().strip()
+        if not text:
             return
-
-        try:
-            if re.match(r"^[0-9a-fA-F-]{36}$", search_text):
-                vtl_url = f"https://vtl.lol/id/{search_text}"
-                self.vtl_web.load(QUrl(vtl_url))
-                self.status_bar.showMessage(f"Searching by PUUID: {search_text}", 3000)
-            elif '#' in search_text:
-                username, tag = search_text.split('#', 1)
-                vtl_url = f"https://vtl.lol/id/{username}_{tag}"
-                self.vtl_web.load(QUrl(vtl_url))
-                self.status_bar.showMessage(f"Searching: {search_text}", 3000)
-            else:
-                self.status_bar.showMessage("Invalid input. Use Username#Tag or a valid PUUID", 4000)
-        except Exception as e:
-            self.status_bar.showMessage(f"Error: {str(e)}", 3000)
+        if '#' in text:
+            user, tag = text.split('#', 1)
+            self.vtl_web.load(QUrl(f"https://vtl.lol/id/{user}_{tag}"))
+        elif re.match(r"^[0-9a-fA-F-]{36}$", text):
+            self.vtl_web.load(QUrl(f"https://vtl.lol/id/{text}"))
+        else:
+            self.status_bar.showMessage("Invalid format. Use Username#Tag", 3000)
 
     def start_vry(self):
-        verbose_level = self.settings.value("verbose_level", 0, type=int)
+        verbose = self.settings.value("verbose_level", 0, type=int)
+        if verbose > 0:
+            self.console_output.append("Starting VRY...\n")
         
-        if verbose_level > 0:
-            self.console_output.append("Starting VALORANT Rank Yoinker...\n")
-        
-        self.worker_thread = VRYWorkerThread(verbose_level)
+        self.worker_thread = VRYWorkerThread(verbose)
         self.worker_thread.output_signal.connect(self.on_console_output)
         self.worker_thread.error_signal.connect(self.on_console_error)
         self.worker_thread.table_update_signal.connect(self.on_table_update)
@@ -1809,14 +1364,9 @@ class VRYMainWindow(QMainWindow):
             if was_frozen:
                 self.freeze_btn.setChecked(False)
                 self.toggle_freeze(False)
-            
-            if self.worker_thread.verbose_level > 0:
-                self.console_output.append("Refreshing data...\n")
             self.status_bar.showMessage("Refreshing...", 2000)
-            
             if was_frozen:
-                QTimer.singleShot(500, lambda: self.freeze_btn.setChecked(True))
-                QTimer.singleShot(500, lambda: self.toggle_freeze(True))
+                QTimer.singleShot(500, lambda: (self.freeze_btn.setChecked(True), self.toggle_freeze(True)))
     
     def on_console_output(self, text):
         self.console_output.append(text)
@@ -1827,112 +1377,85 @@ class VRYMainWindow(QMainWindow):
     
     def on_table_row_update(self, row_data, metadata):
         if not self.freeze_btn.isChecked():
-            md = dict(metadata) if metadata else {}
-            md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
+            md = dict(metadata)
+            md['incognito_privacy'] = self.incognito_action.isChecked()
             self.player_table.add_row_streaming(row_data, md)
     
     def on_table_update(self, data, metadata):
         self.player_table_data = data
-        md = dict(metadata) if metadata else {}
-        md['incognito_privacy'] = self.incognito_privacy_menu_action.isChecked()
+        md = dict(metadata)
+        md['incognito_privacy'] = self.incognito_action.isChecked()
         self.player_table_metadata = md
         
         if not self.freeze_btn.isChecked():
             self.player_table.update_table(data, md)
             self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
     
-    def on_status_update(self, state, extra_info):
-        state_display = {
-            "INGAME": "In-Game",
-            "PREGAME": "Agent Select",
-            "MENUS": "In-Menus"
-        }.get(state, state)
-        
-        status_text = f"Status: {state_display}"
-        if extra_info:
-            if "Attacker" in extra_info:
-                extra_info = extra_info.replace("Attacker", "⚔ Attacker")
-            elif "Defender" in extra_info:
-                extra_info = extra_info.replace("Defender", "🛡 Defender")
-            status_text += f"{extra_info}"
-        
-        self.status_label.setText(status_text)
+    def on_status_update(self, state, extra):
+        display = {"INGAME": "In-Game", "PREGAME": "Agent Select", "MENUS": "In-Menus"}.get(state, state)
+        text = f"Status: {display}"
+        if extra:
+            if "Attacker" in extra:
+                extra = extra.replace("Attacker", "⚔ Attacker")
+            elif "Defender" in extra:
+                extra = extra.replace("Defender", "🛡 Defender")
+            text += f" • {extra}"
+        self.status_label.setText(text)
     
-    def on_incognito_privacy_changed(self, checked):
-        if self.worker_thread:
-            try:
-                self.worker_thread.incognito_privacy = checked
-            except:
-                pass
-        
+    def on_incognito_changed(self, checked):
         self.settings.setValue("incognito_privacy", checked)
-        
-        if self.player_table_data and self.player_table_metadata:
+        if self.player_table_data:
             self.on_table_update(self.player_table_data, self.player_table_metadata)
     
     def load_settings(self):
-        theme_name = self.settings.value("theme", "Dark")
-        if theme_name in THEMES:
-            self.change_theme(theme_name)
+        theme = self.settings.value("theme", "Dark")
+        if theme in THEMES:
+            self.change_theme(theme)
         
-        show_matchloadouts = self.settings.value("show_matchloadouts", True, type=bool)
-        show_vtl = self.settings.value("show_vtl", False, type=bool)
-        show_console = self.settings.value("show_console", False, type=bool)
+        self.toggle_matchloadouts.setChecked(self.settings.value("show_matchloadouts", True, type=bool))
+        self.toggle_vtl.setChecked(self.settings.value("show_vtl", False, type=bool))
+        self.toggle_console.setChecked(self.settings.value("show_console", False, type=bool))
         
-        self.toggle_matchloadouts.setChecked(show_matchloadouts)
-        self.toggle_vtl.setChecked(show_vtl)
-        self.toggle_console.setChecked(show_console)
-        
-        if show_matchloadouts:
+        if self.toggle_matchloadouts.isChecked():
             self.toggle_matchloadouts_tab(True)
-        if show_vtl:
+        if self.toggle_vtl.isChecked():
             self.toggle_vtl_tab(True)
-        if show_console:
+        if self.toggle_console.isChecked():
             self.toggle_console_tab(True)
         
-        incognito_privacy = self.settings.value("incognito_privacy", True, type=bool)
-        self.incognito_privacy_menu_action.setChecked(incognito_privacy)
-        
-        verbose_level = self.settings.value("verbose_level", 0, type=int)
-        for action, level in self.verbose_group:
-            action.setChecked(level == verbose_level)
+        self.incognito_action.setChecked(self.settings.value("incognito_privacy", True, type=bool))
     
     def save_settings(self):
         self.settings.setValue("theme", self.current_theme.name)
         self.settings.setValue("show_matchloadouts", self.toggle_matchloadouts.isChecked())
         self.settings.setValue("show_vtl", self.toggle_vtl.isChecked())
         self.settings.setValue("show_console", self.toggle_console.isChecked())
-        self.settings.setValue("incognito_privacy", self.incognito_privacy_menu_action.isChecked())
+        self.settings.setValue("incognito_privacy", self.incognito_action.isChecked())
     
     def closeEvent(self, event):
         self.save_settings()
         
-        if self.matchloadouts_web:
-            if hasattr(self.matchloadouts_web, 'cleanup'):
-                self.matchloadouts_web.cleanup()
+        if self.matchloadouts_web and hasattr(self.matchloadouts_web, 'cleanup'):
+            self.matchloadouts_web.cleanup()
         
         if self.worker_thread:
             self.worker_thread.stop()
             self.worker_thread.quit()
-            self.worker_thread.wait(3000)
-
+            if not self.worker_thread.wait(5000):
+                self.worker_thread.terminate()
+        
         event.accept()
 
 
 def main():
-    
     if len(sys.argv) > 1 and sys.argv[1] == "--config":
         configure()
-        run_app = inquirer.confirm(
-            message="Do you want to run vRY now?", default=True
-        ).execute()
-        if not run_app:
+        if not inquirer.confirm(message="Run vRY now?", default=True).execute():
             sys.exit(0)
     
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName("VRY - UI v2.13")
-    app.setOrganizationName("VRY")
+    app.setApplicationName("VRY - UI v2.14")
     
     window = VRYMainWindow()
     window.show()
