@@ -1,5 +1,5 @@
 """
-VRY - UI v2.14
+VRY - UI v2.15
 Fixed: Event loop crash, optimized for lightweight usage
 """
 
@@ -1274,7 +1274,7 @@ class VRYMainWindow(QMainWindow):
             pass
     
     def init_ui(self):
-        self.setWindowTitle("VRY - UI v2.14")
+        self.setWindowTitle("VRY - UI v2.15")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
         self.setFont(QFont("Segoe UI", 9))
@@ -1887,7 +1887,7 @@ def main():
     
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName("VRY - UI v2.14")
+    app.setApplicationName("VRY - UI v2.15")
     
     window = VRYMainWindow()
     window.show()
