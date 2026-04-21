@@ -148,7 +148,7 @@ class Content():
         act_found = False
         episode = []
         episode = self.content["Seasons"][0]
-        for season in self.content["Seasons"]:
+        for season in self.content.get("Seasons", []):
             # Check for matching act ID
             if season["ID"].lower() == act_id.lower():
                 act_num = parse_season_number(season["Name"])
