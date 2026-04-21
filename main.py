@@ -231,8 +231,8 @@ class VRYWorkerThread(QThread):
             self.gameContent = self.content.get_content()
             self.seasonID = self.content.get_latest_season_id(self.gameContent)
             self.previousSeasonID = self.content.get_previous_season_id(self.gameContent)
-            self.seasonActEp = self.content.get_act_episode_from_act_id(self.seasonID)
-            self.previousSeasonActEp = self.content.get_act_episode_from_act_id(self.previousSeasonID)
+            self.seasonActEp = self.content.get_act_episode_from_act_id(self.seasonID) if self.seasonID else {"act": None, "episode": None}
+            self.previousSeasonActEp = self.content.get_act_episode_from_act_id(self.previousSeasonID) if self.previousSeasonID else {"act": None, "episode": None}
             
             self.initialized = True
             self.output_signal.emit(f"VRY Mobile - {self.get_ip()}:{self.cfg.port}")
