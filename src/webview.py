@@ -278,7 +278,7 @@ class MatchLoadoutsContainer(QWidget):
         if not self.web_view:
             try:
                 self.web_view = PerformanceWebView()
-                self.web_view.load(QUrl("https://vry-ui.netlify.app/matchLoadouts"))
+                self.web_view.load(QUrl("https://vry-ui.vercel.app/matchLoadouts"))
                 self.web_view.load_finished.connect(self.on_load_finished)
                 self.content_layout.addWidget(self.web_view)
             except Exception as e:

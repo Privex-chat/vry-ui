@@ -1514,7 +1514,7 @@ class VRYMainWindow(QMainWindow):
                 self.matchloadouts_web = MatchLoadoutsContainer()
             else:
                 self.matchloadouts_web = QWebEngineView()
-                self.matchloadouts_web.load(QUrl("https://vry-ui.netlify.app/matchLoadouts"))
+                self.matchloadouts_web.load(QUrl("https://vry-ui.vercel.app/matchLoadouts"))
             self.tabs.addTab(self.matchloadouts_web, "Match Loadouts")
         elif not checked and self.matchloadouts_web:
             idx = self.tabs.indexOf(self.matchloadouts_web)
