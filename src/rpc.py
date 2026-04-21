@@ -142,3 +142,13 @@ class Rpc():
             except DiscordNotFound:
                 self.discord_running = False
         self.last_presence_data = presence
+
+    def close(self):
+        """Safely close the Discord RPC connection."""
+        if self.discord_running:
+            try:
+                self.rpc.close()
+            except Exception:
+                pass
+            finally:
+                self.discord_running = False

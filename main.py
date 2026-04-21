@@ -383,6 +383,7 @@ class VRYWorkerThread(QThread):
 
     def _wait_for_initial_presence(self):
         """Wait for initial Valorant presence"""
+        self.status_signal.emit("WAITING", "")
         while self.running and not self._shutdown_event.is_set():
             presence = self.presences.get_presence()
             private_presence = self.presences.get_private_presence(presence)
@@ -427,6 +428,8 @@ class VRYWorkerThread(QThread):
             if self.game_state == "MENUS":
                 self.rank.invalidate_cached_responses()
                 self.player_cache.invalidate()
+                self.pstats.clear_runtime_cache()
+                self.namesClass.clear_incognito_cache()
 
     def _get_gamemode(self, priv_presence):
         if priv_presence["provisioningFlow"] == "CustomGame" or \
@@ -864,12 +867,12 @@ class VRYTableWidget(QTableWidget):
         
     def setup_table(self):
         self.setColumnCount(14)
-        headers = ["Party", "Agent", "Name", "Skin", "Rank", "RR", 
+        headers = ["Party", "Agent", "Name", "Skin", "Rank", "RR",
                   "Peak", "Previous", "Pos.", "HS%", "WR%", "K/D", "Level", "ΔRR"]
         self.setHorizontalHeaderLabels(headers)
-        
+
         self.horizontalHeader().setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        
+
         header = self.horizontalHeader()
         for col in range(self.columnCount()):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
@@ -877,10 +880,60 @@ class VRYTableWidget(QTableWidget):
         for col in [2, 3, 4, 6, 7, 10]:
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
 
-        self.setSortingEnabled(True)
+        self.setSortingEnabled(False)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.verticalHeader().setVisible(False)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         self.apply_theme(self.current_theme)
+
+    def _show_context_menu(self, pos):
+        row = self.rowAt(pos.y())
+        if row < 0:
+            return
+
+        # Get puuid from hidden data stored in party column (column 0)
+        name_item = self.item(row, 2)
+        puuid_item = self.item(row, 0)
+        if not puuid_item:
+            return
+
+        puuid = puuid_item.data(Qt.ItemDataRole.UserRole)
+        name_text = name_item.text() if name_item else ""
+
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet(self.styleSheet())
+
+        if name_text and name_text not in ("Incognito", ""):
+            copy_name = menu.addAction(f"Copy Name: {name_text}")
+            copy_name.triggered.connect(lambda: QApplication.clipboard().setText(name_text))
+
+        if puuid:
+            copy_puuid = menu.addAction("Copy PUUID")
+            copy_puuid.triggered.connect(lambda: QApplication.clipboard().setText(puuid))
+
+            open_vtl = menu.addAction("Open on vtl.lol")
+            open_vtl.triggered.connect(lambda: self._open_vtl(puuid, name_text))
+
+            if name_text and '#' in name_text:
+                user, tag = name_text.split('#', 1)
+                open_tracker = menu.addAction("Open on tracker.gg")
+                open_tracker.triggered.connect(
+                    lambda: __import__('webbrowser').open(
+                        f"https://tracker.gg/valorant/profile/riot/{user}%23{tag}/overview"
+                    )
+                )
+
+        menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _open_vtl(self, puuid, name_text):
+        # Find the parent main window to navigate VTL tab
+        parent = self.parent()
+        while parent and not isinstance(parent, QMainWindow):
+            parent = parent.parent()
+        if parent and hasattr(parent, '_navigate_vtl'):
+            parent._navigate_vtl(puuid, name_text)
 
     def apply_theme(self, theme):
         self.current_theme = theme
@@ -914,11 +967,34 @@ class VRYTableWidget(QTableWidget):
     def freeze_table(self, freeze):
         self.is_frozen = freeze
     
+    def add_separator_row(self):
+        """Insert a thin visual divider between ally and enemy sections."""
+        row_position = self.rowCount()
+        self.insertRow(row_position)
+        self.setRowHeight(row_position, 4)
+        for col in range(self.columnCount()):
+            item = QTableWidgetItem("")
+            item.setBackground(QColor(80, 80, 80, 120))
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.setItem(row_position, col, item)
+
     def add_row_streaming(self, row_data, metadata):
         if self.is_frozen:
             return
-        if metadata.get("clear_table"):
+        if metadata.get("clear_table") and self.rowCount() == 0:
+            pass  # already cleared by update_table or first row
+        elif metadata.get("clear_table") and metadata.get("_row_index", 0) == 0:
             self.setRowCount(0)
+
+        # Insert separator before first enemy row in INGAME
+        if (metadata.get("state") == "INGAME"
+                and not row_data.get("is_self")
+                and not row_data.get("is_party")
+                and row_data.get("team") != row_data.get("ally_team")
+                and not metadata.get("_separator_added")):
+            metadata["_separator_added"] = True
+            self.add_separator_row()
+
         row_position = self.rowCount()
         self.insertRow(row_position)
         self._populate_row(row_position, row_data, metadata)
@@ -960,9 +1036,10 @@ class VRYTableWidget(QTableWidget):
         is_party = row_data.get("is_party", False)
         incognito = row_data.get("incognito", False)
 
-        # Party
+        # Party (also stores puuid in UserRole for context menu)
         item = parse_ansi(row_data.get("party", ""))
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setData(Qt.ItemDataRole.UserRole, row_data.get("puuid", ""))
         self.setItem(row_position, 0, item)
 
         # Agent
@@ -977,13 +1054,27 @@ class VRYTableWidget(QTableWidget):
         self.setItem(row_position, 1, item)
 
         # Name
-        if incognito and privacy and not is_self and not is_party:
-            item = QTableWidgetItem("Incognito")
-            item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-            item.setForeground(QColor(128, 0, 0))
+        name_val = str(row_data.get("name", ""))
+        if incognito and not is_self and not is_party:
+            if not name_val:
+                # vtl.lol failed — show agent name as italic gray fallback
+                agent_val = ANSI_ANY_RE.sub("", str(row_data.get("agent", ""))) or "???"
+                item = QTableWidgetItem(agent_val)
+                _f = QFont("Segoe UI", 9)
+                _f.setItalic(True)
+                item.setFont(_f)
+                item.setForeground(QColor(120, 120, 120))
+            elif privacy:
+                # vtl.lol resolved but privacy on — hide identity
+                item = QTableWidgetItem("Incognito")
+                item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                item.setForeground(QColor(128, 0, 0))
+            else:
+                # vtl.lol resolved and privacy off — show real name with asterisk marker
+                item = parse_ansi("*" + name_val)
+                item.setForeground(QColor(200, 200, 200))
         else:
-            name = ("*" + str(row_data.get("name", ""))) if incognito and not privacy else str(row_data.get("name", ""))
-            item = parse_ansi(name)
+            item = parse_ansi(name_val)
             if is_self:
                 item.setForeground(QColor(255, 215, 0))
             elif is_party:
@@ -1015,28 +1106,73 @@ class VRYTableWidget(QTableWidget):
         prev_text = format_rank(row_data.get("previous_rank", ""), row_data.get("previous_act"), row_data.get("previous_ep"))
         self.setItem(row_position, 7, parse_ansi(prev_text))
 
-        # Leaderboard
+        # Leaderboard — gold # prefix for ranked players
         lb = row_data.get("leaderboard", 0)
-        item = QTableWidgetItem(str(lb) if lb and lb > 0 else "")
+        if lb and lb > 0:
+            item = QTableWidgetItem(f"#{lb}")
+            item.setForeground(QColor(255, 215, 0))
+        else:
+            item = QTableWidgetItem("")
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 8, item)
 
-        # HS%
+        # HS% — color gradient: <20 dark red, 20-30 yellow, 30+ green
         hs = row_data.get("hs", "N/A")
-        item = QTableWidgetItem(f"{float(hs):.1f}%" if hs != "N/A" else "N/A")
+        if hs != "N/A":
+            try:
+                hs_val = float(hs)
+                item = QTableWidgetItem(f"{hs_val:.0f}%")
+                if hs_val < 20:
+                    item.setForeground(QColor(200, 60, 60))
+                elif hs_val < 30:
+                    item.setForeground(QColor(220, 190, 60))
+                else:
+                    item.setForeground(QColor(60, 200, 100))
+            except (ValueError, TypeError):
+                item = QTableWidgetItem("N/A")
+        else:
+            item = QTableWidgetItem("N/A")
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 9, item)
 
-        # WR%
-        wr = row_data.get("wr", "N/a")
+        # WR% — color: <45 red, 45-55 white, >55 green
+        wr = row_data.get("wr", "N/A")
         games = row_data.get("games", 0)
-        item = QTableWidgetItem(f"{wr}% ({games})" if wr != "N/a" else f"N/A ({games})")
+        if wr not in ("N/A", "N/a"):
+            try:
+                wr_val = int(wr)
+                item = QTableWidgetItem(f"{wr_val}% ({games})")
+                if wr_val < 45:
+                    item.setForeground(QColor(200, 60, 60))
+                elif wr_val > 55:
+                    item.setForeground(QColor(60, 200, 100))
+                else:
+                    item.setForeground(QColor(220, 220, 220))
+            except (ValueError, TypeError):
+                item = QTableWidgetItem(f"N/A ({games})")
+        else:
+            item = QTableWidgetItem(f"N/A ({games})")
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 10, item)
 
-        # K/D
+        # K/D — color: <0.8 red, 0.8-1.2 white, >1.2 green, >2.0 gold
         kd = row_data.get("kd", "N/A")
-        item = QTableWidgetItem(f"{float(kd):.2f}" if kd != "N/A" else "N/A")
+        if kd != "N/A":
+            try:
+                kd_val = float(kd)
+                item = QTableWidgetItem(f"{kd_val:.2f}")
+                if kd_val >= 2.0:
+                    item.setForeground(QColor(255, 215, 0))
+                elif kd_val >= 1.2:
+                    item.setForeground(QColor(60, 200, 100))
+                elif kd_val >= 0.8:
+                    item.setForeground(QColor(220, 220, 220))
+                else:
+                    item.setForeground(QColor(200, 60, 60))
+            except (ValueError, TypeError):
+                item = QTableWidgetItem("N/A")
+        else:
+            item = QTableWidgetItem("N/A")
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 11, item)
 
@@ -1052,13 +1188,40 @@ class VRYTableWidget(QTableWidget):
         earned = row_data.get("earned_rr", "N/A")
         afk = row_data.get("afk_penalty", "N/A")
         if earned != "N/A" and afk != "N/A":
-            text = f"{earned:+d}" + (f" ({afk})" if afk != 0 else "")
-            item = QTableWidgetItem(text)
-            item.setForeground(QColor(0, 255, 0) if earned > 0 else QColor(255, 0, 0) if earned < 0 else QColor(255, 255, 255))
+            try:
+                text = f"{int(earned):+d}" + (f" ({afk})" if afk != 0 else "")
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor(0, 255, 0) if int(earned) > 0 else QColor(255, 0, 0) if int(earned) < 0 else QColor(255, 255, 255))
+            except (ValueError, TypeError):
+                item = QTableWidgetItem("")
         else:
             item = QTableWidgetItem("")
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 13, item)
+
+        # Row background tinting and self-row bold
+        is_ally = (
+            row_data.get("is_self") or
+            row_data.get("is_party") or
+            (row_data.get("team") == row_data.get("ally_team")) or
+            row_data.get("team") is None  # MENUS / PREGAME
+        )
+        if is_ally:
+            row_bg = QColor(0, 60, 20, 50)    # subtle green tint
+        else:
+            row_bg = QColor(80, 0, 0, 50)     # subtle red tint
+
+        bold_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        normal_font = QFont("Segoe UI", 9)
+
+        for col in range(self.columnCount()):
+            cell = self.item(row_position, col)
+            if cell:
+                cell.setBackground(row_bg)
+                if is_self:
+                    cell.setFont(bold_font)
+                else:
+                    cell.setFont(normal_font)
     
     def _update_column_visibility(self, metadata):
         state = metadata.get("state", "")
@@ -1082,7 +1245,8 @@ class VRYMainWindow(QMainWindow):
         
         self.config = Config(None)
         self.show_resource_warning = self.config.get_feature_flag("show_resource_warning")
-        
+        self._last_status_time = time.time()
+
         self.init_ui()
         self.load_settings()
         
@@ -1090,7 +1254,11 @@ class VRYMainWindow(QMainWindow):
             self.resource_timer = QTimer()
             self.resource_timer.timeout.connect(self.monitor_resources)
             self.resource_timer.start(60000)  # Check every minute
-        
+
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.timeout.connect(self._check_worker_watchdog)
+        self._watchdog_timer.start(30000)  # Check every 30s
+
         QTimer.singleShot(100, self.start_vry)
     
     def monitor_resources(self):
@@ -1132,8 +1300,23 @@ class VRYMainWindow(QMainWindow):
         status_layout = QHBoxLayout(status_panel)
         status_layout.setContentsMargins(0, 0, 0, 10)
         
-        self.status_label = QLabel("Status: Initializing...")
-        self.status_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        # Animated polling dot
+        self._dot_state = True
+        self._dot_timer = QTimer(self)
+        self._dot_timer.timeout.connect(self._tick_dot)
+        self._dot_timer.start(1000)
+
+        self._poll_dot = QLabel("●")
+        self._poll_dot.setFont(QFont("Segoe UI", 10))
+        self._poll_dot.setFixedWidth(16)
+        self._poll_dot.setStyleSheet("color: #555;")
+        status_layout.addWidget(self._poll_dot)
+
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.status_label.setStyleSheet(
+            "padding: 4px 10px; border-radius: 6px; background: #333; color: #ccc;"
+        )
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
         
@@ -1158,9 +1341,34 @@ class VRYMainWindow(QMainWindow):
         # Console (hidden by default)
         self.console_widget = QWidget()
         console_layout = QVBoxLayout(self.console_widget)
+        console_layout.setContentsMargins(4, 4, 4, 4)
+        console_layout.setSpacing(4)
+
+        # Console toolbar
+        console_toolbar = QHBoxLayout()
+        console_toolbar.addWidget(QLabel("Verbosity:"))
+        self._verbosity_combo = QComboBox()
+        self._verbosity_combo.addItems(["Quiet", "Normal", "Debug"])
+        self._verbosity_combo.setCurrentIndex(self.settings.value("verbose_level", 0, type=int))
+        self._verbosity_combo.setMaximumWidth(90)
+        self._verbosity_combo.currentIndexChanged.connect(self._on_verbosity_changed)
+        console_toolbar.addWidget(self._verbosity_combo)
+        console_toolbar.addStretch()
+        _clear_btn = QPushButton("Clear")
+        _clear_btn.setMaximumWidth(70)
+        _clear_btn.clicked.connect(lambda: self.console_output.clear())
+        console_toolbar.addWidget(_clear_btn)
+        _copy_btn = QPushButton("Copy All")
+        _copy_btn.setMaximumWidth(80)
+        _copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.console_output.toPlainText()))
+        console_toolbar.addWidget(_copy_btn)
+        console_layout.addLayout(console_toolbar)
+
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.console_output.setFont(QFont("Consolas", 9))
+        self._console_auto_scroll = True
+        self.console_output.verticalScrollBar().valueChanged.connect(self._on_console_scroll)
         console_layout.addWidget(self.console_output)
         
         self.status_bar = QStatusBar()
@@ -1190,9 +1398,14 @@ class VRYMainWindow(QMainWindow):
         refresh.setShortcut('F5')
         refresh.triggered.connect(self.refresh_data)
         file_menu.addAction(refresh)
-        
+
+        settings_action = QAction('Settings...', self)
+        settings_action.setShortcut('Ctrl+,')
+        settings_action.triggered.connect(self.open_settings)
+        file_menu.addAction(settings_action)
+
         file_menu.addSeparator()
-        
+
         exit_action = QAction('Exit', self)
         exit_action.setShortcut('Ctrl+Q')
         exit_action.triggered.connect(self.close)
@@ -1228,13 +1441,35 @@ class VRYMainWindow(QMainWindow):
         self.toggle_console.triggered.connect(self.toggle_console_tab)
         view_menu.addAction(self.toggle_console)
         
+        compact_action = QAction('Compact Mode', self)
+        compact_action.setCheckable(True)
+        compact_action.triggered.connect(self.toggle_compact_mode)
+        view_menu.addAction(compact_action)
+        self.compact_action = compact_action
+
         view_menu.addSeparator()
-        
+
         self.incognito_action = QAction('Incognito Privacy', self)
         self.incognito_action.setCheckable(True)
         self.incognito_action.setChecked(True)
         self.incognito_action.triggered.connect(self.on_incognito_changed)
         view_menu.addAction(self.incognito_action)
+
+        # Keyboard shortcuts
+        freeze_sc = QAction(self)
+        freeze_sc.setShortcut('Ctrl+F')
+        freeze_sc.triggered.connect(lambda: (self.freeze_btn.toggle(), self.toggle_freeze(self.freeze_btn.isChecked())))
+        self.addAction(freeze_sc)
+
+        refresh_sc = QAction(self)
+        refresh_sc.setShortcut('Ctrl+R')
+        refresh_sc.triggered.connect(self.refresh_data)
+        self.addAction(refresh_sc)
+
+        cycle_theme_sc = QAction(self)
+        cycle_theme_sc.setShortcut('Ctrl+T')
+        cycle_theme_sc.triggered.connect(self._cycle_theme)
+        self.addAction(cycle_theme_sc)
     
     def apply_theme(self, theme):
         self.current_theme = theme
@@ -1367,12 +1602,191 @@ class VRYMainWindow(QMainWindow):
             self.status_bar.showMessage("Refreshing...", 2000)
             if was_frozen:
                 QTimer.singleShot(500, lambda: (self.freeze_btn.setChecked(True), self.toggle_freeze(True)))
+
+    def _tick_dot(self):
+        """Animate the polling dot at 1 Hz."""
+        if not self.freeze_btn.isChecked():
+            self._dot_state = not self._dot_state
+            self._poll_dot.setStyleSheet("color: #4caf50;" if self._dot_state else "color: #1a5c22;")
+
+    def _cycle_theme(self):
+        names = list(THEMES.keys())
+        cur = getattr(self.current_theme, 'name', names[0])
+        idx = names.index(cur) if cur in names else 0
+        self.change_theme(names[(idx + 1) % len(names)])
+
+    def toggle_compact_mode(self, checked):
+        if checked:
+            self.player_table.verticalHeader().setDefaultSectionSize(18)
+            self.player_table.setFont(QFont("Segoe UI", 9))
+        else:
+            self.player_table.verticalHeader().setDefaultSectionSize(30)
+            self.player_table.setFont(QFont("Segoe UI", 10))
+        self.settings.setValue("compact_mode", checked)
+
+    def _navigate_vtl(self, puuid, name_text=""):
+        """Navigate the VTL tab to a specific player."""
+        if not self.toggle_vtl.isChecked():
+            self.toggle_vtl.setChecked(True)
+            self.toggle_vtl_tab(True)
+        if hasattr(self, 'vtl_web') and self.vtl_web:
+            self.vtl_web.load(QUrl(f"https://vtl.lol/id/{puuid}"))
+            # Switch to VTL tab
+            if hasattr(self, 'vtl_container'):
+                idx = self.tabs.indexOf(self.vtl_container)
+                if idx >= 0:
+                    self.tabs.setCurrentIndex(idx)
+
+    def open_settings(self):
+        """Open a simple settings dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        dialog.setMinimumWidth(400)
+        layout = QVBoxLayout(dialog)
+
+        from src.config import Config
+        from src.constants import DEFAULT_CONFIG, WEAPONS
+
+        cfg = Config(None)
+
+        # Weapon selector
+        weapon_row = QHBoxLayout()
+        weapon_row.addWidget(QLabel("Tracked Weapon:"))
+        weapon_combo = QComboBox()
+        weapon_combo.addItems(WEAPONS)
+        current_weapon = getattr(cfg, 'weapon', 'Vandal').capitalize()
+        idx = weapon_combo.findText(current_weapon)
+        if idx >= 0:
+            weapon_combo.setCurrentIndex(idx)
+        weapon_row.addWidget(weapon_combo)
+        layout.addLayout(weapon_row)
+
+        # Cooldown
+        cooldown_row = QHBoxLayout()
+        cooldown_row.addWidget(QLabel("Cooldown (s):"))
+        cooldown_spin = QSpinBox()
+        cooldown_spin.setRange(2, 60)
+        cooldown_spin.setValue(getattr(cfg, 'cooldown', 10))
+        cooldown_row.addWidget(cooldown_spin)
+        layout.addLayout(cooldown_row)
+
+        # Port
+        port_row = QHBoxLayout()
+        port_row.addWidget(QLabel("WebSocket Port:"))
+        port_spin = QSpinBox()
+        port_spin.setRange(1024, 65535)
+        port_spin.setValue(getattr(cfg, 'port', 1100))
+        port_row.addWidget(port_spin)
+        restart_label = QLabel("⚠ Restart required")
+        restart_label.setStyleSheet("color: orange; font-size: 9px;")
+        port_row.addWidget(restart_label)
+        layout.addLayout(port_row)
+
+        # Feature flags
+        flags_group = QGroupBox("Feature Flags")
+        flags_layout = QGridLayout(flags_group)
+        flag_keys = [
+            ("discord_rpc", "Discord RPC"),
+            ("game_chat", "In-game Chat"),
+            ("peak_rank_act", "Peak Rank Act/Ep"),
+            ("auto_hide_leaderboard", "Auto-hide Leaderboard"),
+            ("aggregate_rank_rr", "Aggregate Rank+RR"),
+            ("truncate_names", "Truncate Long Names"),
+            ("truncate_skins", "Truncate Skin Names"),
+            ("short_ranks", "Short Rank Names"),
+        ]
+        flag_checks = {}
+        for i, (key, label) in enumerate(flag_keys):
+            cb = QCheckBox(label)
+            cb.setChecked(cfg.get_feature_flag(key))
+            flag_checks[key] = cb
+            flags_layout.addWidget(cb, i // 2, i % 2)
+        layout.addWidget(flags_group)
+
+        # Table columns
+        cols_group = QGroupBox("Table Columns")
+        cols_layout = QGridLayout(cols_group)
+        col_keys = [
+            ("skin", "Skin"), ("rr", "RR"), ("earned_rr", "ΔRR"),
+            ("peakrank", "Peak Rank"), ("previousrank", "Previous Rank"),
+            ("leaderboard", "Leaderboard"), ("headshot_percent", "HS%"),
+            ("winrate", "WR%"), ("kd", "K/D"), ("level", "Level"),
+        ]
+        col_checks = {}
+        for i, (key, label) in enumerate(col_keys):
+            cb = QCheckBox(label)
+            cb.setChecked(cfg.get_table_flag(key))
+            col_checks[key] = cb
+            cols_layout.addWidget(cb, i // 2, i % 2)
+        layout.addWidget(cols_group)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.setStyleSheet(self.styleSheet())
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            import json as _json
+            try:
+                with open("config.json", "r") as f:
+                    config_data = _json.load(f)
+            except Exception:
+                from src.constants import DEFAULT_CONFIG
+                import copy
+                config_data = copy.deepcopy(DEFAULT_CONFIG)
+
+            config_data["weapon"] = weapon_combo.currentText()
+            config_data["cooldown"] = cooldown_spin.value()
+            config_data["port"] = port_spin.value()
+
+            if "flags" not in config_data:
+                config_data["flags"] = {}
+            for key, cb in flag_checks.items():
+                config_data["flags"][key] = cb.isChecked()
+
+            if "table" not in config_data:
+                config_data["table"] = {}
+            for key, cb in col_checks.items():
+                config_data["table"][key] = cb.isChecked()
+
+            try:
+                with open("config.json", "w") as f:
+                    _json.dump(config_data, f, indent=4)
+                self.status_bar.showMessage("Settings saved. Restart may be required.", 5000)
+            except Exception as e:
+                self.status_bar.showMessage(f"Failed to save settings: {e}", 5000)
     
+    def _on_console_scroll(self, value):
+        sb = self.console_output.verticalScrollBar()
+        self._console_auto_scroll = (value >= sb.maximum() - 4)
+
+    def _on_verbosity_changed(self, index):
+        self.settings.setValue("verbose_level", index)
+        if self.worker_thread:
+            self.worker_thread.verbose_level = index
+
     def on_console_output(self, text):
+        doc = self.console_output.document()
+        # Enforce 1000-line buffer
+        while doc.blockCount() > 1000:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
         self.console_output.append(text)
-    
+        if self._console_auto_scroll:
+            self.console_output.verticalScrollBar().setValue(
+                self.console_output.verticalScrollBar().maximum()
+            )
+
     def on_console_error(self, text):
-        self.console_output.append(f"ERROR: {text}")
+        self.console_output.append(f"<span style='color:#ff6b6b'>ERROR: {text}</span>")
+        self.status_bar.showMessage(f"Error: {text}", 5000)
         self.status_bar.showMessage(f"Error: {text}", 5000)
     
     def on_table_row_update(self, row_data, metadata):
@@ -1391,8 +1805,16 @@ class VRYMainWindow(QMainWindow):
             self.player_table.update_table(data, md)
             self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
     
+    def _check_worker_watchdog(self):
+        if self.worker_thread and self.worker_thread.running:
+            if time.time() - self._last_status_time > 120:
+                self.on_console_error("Worker appears stuck (no update for 120s). Consider restarting.")
+                self._last_status_time = time.time()  # Reset to avoid spam
+
     def on_status_update(self, state, extra):
-        display = {"INGAME": "In-Game", "PREGAME": "Agent Select", "MENUS": "In-Menus"}.get(state, state)
+        self._last_status_time = time.time()
+        display = {"INGAME": "In-Game", "PREGAME": "Agent Select", "MENUS": "In-Menus",
+                   "WAITING": "Waiting for VALORANT..."}.get(state, state)
         text = f"Status: {display}"
         if extra:
             if "Attacker" in extra:
@@ -1408,6 +1830,10 @@ class VRYMainWindow(QMainWindow):
             self.on_table_update(self.player_table_data, self.player_table_metadata)
     
     def load_settings(self):
+        geom = self.settings.value("geometry")
+        if geom:
+            self.restoreGeometry(geom)
+
         theme = self.settings.value("theme", "Dark")
         if theme in THEMES:
             self.change_theme(theme)
@@ -1424,8 +1850,14 @@ class VRYMainWindow(QMainWindow):
             self.toggle_console_tab(True)
         
         self.incognito_action.setChecked(self.settings.value("incognito_privacy", True, type=bool))
-    
+
+        compact = self.settings.value("compact_mode", False, type=bool)
+        if compact:
+            self.compact_action.setChecked(True)
+            self.toggle_compact_mode(True)
+
     def save_settings(self):
+        self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("theme", self.current_theme.name)
         self.settings.setValue("show_matchloadouts", self.toggle_matchloadouts.isChecked())
         self.settings.setValue("show_vtl", self.toggle_vtl.isChecked())

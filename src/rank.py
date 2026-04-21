@@ -21,7 +21,6 @@ class Rank:
     #in future rewrite this code
     def get_rank(self, puuid, seasonID):
         response = self.get_request(puuid)
-        # pyperclip.copy(str(response.json()))
         final = {
             "rank": None,
             "rr": None,
@@ -33,7 +32,8 @@ class Rank:
             "peakrankep": None,
             "statusgood": None,
             "statuscode": None,
-            }
+        }
+        r = {}
         try:
             if response.ok:
                 # self.log("retrieved rank successfully")
@@ -74,35 +74,32 @@ class Rank:
             final["rank"] = 0
             final["rr"] = 0
             final["leaderboard"] = 0
-        max_rank = final["rank"]
+        max_rank = final["rank"] or 0
         max_rank_season = seasonID
-        seasons = r["QueueSkills"]["competitive"].get("SeasonalInfoBySeasonID")
+        competitive = (r.get("QueueSkills") or {}).get("competitive") or {}
+        seasons = competitive.get("SeasonalInfoBySeasonID")
         if seasons is not None:
-            for season in r["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"]:
-                if r["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][season]["WinsByTier"] is not None:
-                    for winByTier in r["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][season]["WinsByTier"]:
+            for season in seasons:
+                if seasons[season]["WinsByTier"] is not None:
+                    for winByTier in seasons[season]["WinsByTier"]:
                         if season in self.ranks_before:
                             if int(winByTier) > 20:
                                 winByTier = int(winByTier) + 3
                         if int(winByTier) > max_rank:
                             max_rank = int(winByTier)
                             max_rank_season = season
-            # rank.append(max_rank)
-            final["peakrank"] = max_rank
-        else:
-            # rank.append(max_rank)
-            final["peakrank"] = max_rank
+        final["peakrank"] = max_rank
         try:
-            wins = r["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][seasonID]["NumberOfWinsWithPlacements"]
-            total_games = r["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][seasonID]["NumberOfGames"]
+            season_data = (r.get("QueueSkills") or {}).get("competitive", {}).get("SeasonalInfoBySeasonID", {}).get(seasonID, {})
+            wins = season_data["NumberOfWinsWithPlacements"]
+            total_games = season_data["NumberOfGames"]
             final["numberofgames"] = total_games
             try:
                 wr = int(wins / total_games * 100)
-            except ZeroDivisionError: #no loses
+            except ZeroDivisionError:
                 wr = 100
-        except (KeyError, TypeError): #haven't played this season, #no data?
-            # print("test")
-            wr = "N/a"
+        except (KeyError, TypeError):
+            wr = "N/A"
 
 
         # rank.append(wr)

@@ -37,9 +37,15 @@ class Colors:
         return Teamcolor
 
     def get_rgb_color_from_skin(self, skin_id, valoApiSkins):
-        for skin in valoApiSkins.json()["data"]:
-            if skin_id == skin["uuid"]:
-                return self.tier_dict[skin["contentTierUuid"]]
+        try:
+            data = valoApiSkins.json()
+            if "data" not in data:
+                return None
+            for skin in data["data"]:
+                if skin_id == skin["uuid"]:
+                    return self.tier_dict.get(skin.get("contentTierUuid"))
+        except Exception:
+            return None
 
     def level_to_color(self, level):
         if level >= 400:
@@ -54,18 +60,17 @@ class Colors:
             return color(level, fore=(211, 211, 211))
 
     def get_agent_from_uuid(self, agentUUID):
-        agent = str(self.agent_dict.get(agentUUID))
-        if self.AGENTCOLORLIST.get(agent.lower()) != None:
-            agent_color = self.AGENTCOLORLIST.get(agent.lower())
+        agent = self.agent_dict.get(agentUUID, "Unknown")
+        agent_color = self.AGENTCOLORLIST.get(agent.lower())
+        if agent_color is not None:
             return color(agent, fore=agent_color)
-        else:
-            return agent
+        return agent
 
     def get_hs_gradient(self, number):
         try:
             number = int(number)
         except ValueError:
-            return color("N/a", fore=(46, 46, 46))
+            return color("N/A", fore=(46, 46, 46))
         dark_red = (64, 15, 10)
         yellow = (140, 119, 11)
         green = (18, 204, 25)
@@ -111,7 +116,7 @@ class Colors:
         try:
             number = int(number)
         except ValueError:
-            return color("N/a", fore=(46, 46, 46))
+            return color("N/A", fore=(46, 46, 46))
         dark_red = (64, 15, 10)
         yellow = (140, 119, 11)
         green = (18, 204, 25)

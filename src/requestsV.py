@@ -151,25 +151,28 @@ class Requests:
             elif url_type == "local":
                 local_headers = {'Authorization': 'Basic ' + base64.b64encode(
                     ('riot:' + self.lockfile['password']).encode()).decode()}
-                
-                while True:
+
+                max_retries = 15
+                for i in range(max_retries):
                     try:
                         response = requests.request(method, f"https://127.0.0.1:{self.lockfile['port']}{endpoint}",
                                                     headers=local_headers,
-                                                    verify=False)
-                        if response.json().get("errorCode") == "RPC_ERROR":
-                            self.log("RPC_ERROR waiting 5 seconds")
-                            time.sleep(5)
+                                                    verify=False, timeout=5)
+                        if response.status_code == 200 and response.json().get("errorCode") != "RPC_ERROR":
+                            if endpoint != "/chat/v4/presences":
+                                self.log(
+                                    f"fetch: url: '{url_type}', endpoint: {endpoint}, method: {method},"
+                                    f" response code: {response.status_code}")
+                            return response.json()
                         else:
-                            break
-                    except ConnectionError:
-                        self.log("Connection error, retrying in 5 seconds")
+                            self.log(f"Local API not ready (RPC_ERROR or status {response.status_code}). Retrying ({i+1}/{max_retries})...")
+                            time.sleep(5)
+                    except (requests.exceptions.RequestException, ConnectionError):
+                        self.log(f"Connection error on local request. Retrying ({i+1}/{max_retries})...")
                         time.sleep(5)
-                if endpoint != "/chat/v4/presences":
-                    self.log(
-                        f"fetch: url: '{url_type}', endpoint: {endpoint}, method: {method},"
-                        f" response code: {response.status_code}")
-                return response.json()
+
+                self.log(f"Failed to connect to local client after {max_retries} attempts.")
+                return None
             elif url_type == "custom":
                 response = requests.request(method, f"{endpoint}", headers=self.get_headers(), verify=False)
                 self.log(

@@ -3,18 +3,48 @@ class PlayerStats:
         self.Requests = Requests
         self.log = log
         self.config = config
+        self.match_details_cache = {}
+
+    def clear_runtime_cache(self):
+        """Clear transient runtime caches (call on MENUS/new match)."""
+        self.match_details_cache.clear()
+
+    def _default_stats(self):
+        return {
+            "kd": "N/A",
+            "hs": "N/A",
+            "RankedRatingEarned": "N/A",
+            "AFKPenalty": "N/A",
+        }
+
+    def _get_match_details_cached(self, match_id):
+        """Fetch /match-details once per match_id for this runtime session."""
+        if not match_id:
+            return None
+
+        if match_id in self.match_details_cache:
+            return self.match_details_cache[match_id]
+
+        match_response = self.Requests.fetch(
+            "pd",
+            f"/match-details/v1/matches/{match_id}",
+            "get",
+        )
+
+        if match_response is None:
+            return None
+
+        if match_response.status_code == 404:
+            return None
+
+        match_data = match_response.json()
+        self.match_details_cache[match_id] = match_data
+        return match_data
 
     def get_stats(self, puuid):
         # Early exit if no stats are required
-        if not self.config.get_table_flag(
-            "headshot_percent"
-        ) and not self.config.get_table_flag("kd"):
-            return {
-                "kd": "N/A",
-                "hs": "N/A",
-                "RankedRatingEarned": "N/A",
-                "AFKPenalty": "N/A",
-            }
+        if not self.config.get_table_flag("headshot_percent") and not self.config.get_table_flag("kd"):
+            return self._default_stats()
 
         # Fetch competitive updates
         try:
@@ -23,49 +53,27 @@ class PlayerStats:
                 f"/mmr/v1/players/{puuid}/competitiveupdates?startIndex=0&endIndex=1&queue=competitive",
                 "get",
             )
+            if response is None:
+                return self._default_stats()
             matches = response.json().get("Matches", [])
             if not matches:
-                return {
-                    "kd": "N/A",
-                    "hs": "N/A",
-                    "RankedRatingEarned": "N/A",
-                    "AFKPenalty": "N/A",
-                }
+                return self._default_stats()
         except Exception as e:
             self.log(f"Error fetching competitive updates: {e}")
-            return {
-                "kd": "N/A",
-                "hs": "N/A",
-                "RankedRatingEarned": "N/A",
-                "AFKPenalty": "N/A",
-            }
+            return self._default_stats()
 
-        match_id = matches[0].get("MatchID")
+        match_summary = matches[0]
+        match_id = match_summary.get("MatchID")
+
         try:
-            match_response = self.Requests.fetch(
-                "pd",
-                f"/match-details/v1/matches/{match_id}",
-                "get",
-            )
-            if match_response.status_code == 404:
-                return {
-                    "kd": "N/A",
-                    "hs": "N/A",
-                    "RankedRatingEarned": "N/A",
-                    "AFKPenalty": "N/A",
-                }
-
-            match_data = match_response.json()
+            match_data = self._get_match_details_cached(match_id)
+            if match_data is None:
+                return self._default_stats()
         except Exception as e:
             self.log(f"Error fetching match details: {e}")
-            return {
-                "kd": "N/A",
-                "hs": "N/A",
-                "RankedRatingEarned": "N/A",
-                "AFKPenalty": "N/A",
-            }
+            return self._default_stats()
 
-        return self._process_match_data(puuid, match_data, matches[0])
+        return self._process_match_data(puuid, match_data, match_summary)
 
     def _process_match_data(self, puuid, match_data, match_summary):
         total_hits, total_headshots, kills, deaths = 0, 0, 0, 0
@@ -73,7 +81,7 @@ class PlayerStats:
         # Extract round stats
         for rround in match_data.get("roundResults", []):
             for player in rround.get("playerStats", []):
-                if player["subject"] == puuid:
+                if player.get("subject") == puuid:
                     for hits in player.get("damage", []):
                         total_hits += (
                             hits.get("legshots", 0)
@@ -84,25 +92,23 @@ class PlayerStats:
 
         # Extract overall player stats
         for player in match_data.get("players", []):
-            if player["subject"] == puuid:
-                kills = player["stats"].get("kills", 0)
-                deaths = player["stats"].get("deaths", 0)
+            if player.get("subject") == puuid:
+                stats = player.get("stats", {})
+                kills = stats.get("kills", 0)
+                deaths = stats.get("deaths", 0)
                 break
 
-        # Calculate KD
         kd = round(kills / deaths, 2) if deaths else kills
 
-        ranked_rating_earned = match_summary["RankedRatingEarned"]
-        afk_penalty = match_summary["AFKPenalty"]
+        ranked_rating_earned = match_summary.get("RankedRatingEarned", "N/A")
+        afk_penalty = match_summary.get("AFKPenalty", "N/A")
 
-        # Compile final stats
-        final_stats = {
+        return {
             "kd": kd,
-            "hs": int((total_headshots / total_hits) * 100) if total_hits else "N/A",
+            "hs": round((total_headshots / total_hits) * 100) if total_hits else "N/A",
             "RankedRatingEarned": ranked_rating_earned,
             "AFKPenalty": afk_penalty,
         }
-        return final_stats
 
 
 if __name__ == "__main__":
