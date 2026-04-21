@@ -11,19 +11,25 @@ class Content():
         return self.content
 
     def get_latest_season_id(self, content):
-        for season in content["Seasons"]:
-            if season["IsActive"] and season["Type"] == "act":
+        for season in content.get("Seasons", []):
+            if season.get("IsActive") and season.get("Type") == "act":
                 self.log(f"retrieved season id: {season['ID']}")
                 return season["ID"]
-
+        self.log("WARNING: Could not find active season ID")
+        return None
+    
     def get_previous_season_id(self, content):
-        currentseason = []
-        for season in content["Seasons"]:
-            if season["IsActive"] and season["Type"] == "act":
+        currentseason = None
+        for season in content.get("Seasons", []):
+            if season.get("IsActive") and season.get("Type") == "act":
                 currentseason = season
-
-        for season in content["Seasons"]:
-            if currentseason["StartTime"] == season["EndTime"] and season["Type"] == "act":
+    
+        if currentseason is None:
+            self.log("WARNING: Could not find current season for previous-season lookup")
+            return None
+    
+        for season in content.get("Seasons", []):
+            if currentseason.get("StartTime") == season.get("EndTime") and season.get("Type") == "act":
                 self.log(f"retrieved previous season id: {season['ID']}")
                 return season["ID"]
         return None
