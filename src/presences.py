@@ -40,7 +40,6 @@ class Presences:
         return None
 
     def decode_presence(self, private):
-        # try:
         if "{" not in str(private) and private is not None and str(private) != "":
             dict = json.loads(base64.b64decode(str(private)).decode("utf-8"))
             if dict.get("isValid"):
@@ -53,10 +52,11 @@ class Presences:
         }
 
     def wait_for_presence(self, PlayersPuuids):
+        """Block until every PUUID in PlayersPuuids appears in the presence list."""
         while True:
             presence = self.get_presence()
-            for puuid in PlayersPuuids:
-                if puuid not in str(presence):
-                    time.sleep(1)
-                    continue
-            break
+            presence_str = str(presence)
+            # Check all PUUIDs are present before breaking out of the loop.
+            if all(puuid in presence_str for puuid in PlayersPuuids):
+                break
+            time.sleep(1)

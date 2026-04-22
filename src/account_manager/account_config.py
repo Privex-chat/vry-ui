@@ -1,4 +1,5 @@
 import yaml, json, os, subprocess, time
+
 class AccountConfig:
     def __init__(self, log):
         self.log = log
@@ -44,9 +45,7 @@ class AccountConfig:
                 cookies.update({cookie_name: cookie_value})
             return cookies
 
-
     def create_yaml_config_file(self, account_data):
-
         return {
             "riot-login": {
                 "persist": {
@@ -138,7 +137,6 @@ class AccountConfig:
                 "bp_level": data.get("bp_level"),
                 "expire_in": authdata.get("expire_in"),
                 "lol_region": authdata.get("lol_region"),
-                #convert to base64 maybe in future        
             }
         }
         updated_data[authdata.get("cookies").get("sub")].update(cookies_dict)
@@ -152,14 +150,13 @@ class AccountConfig:
         del self.accounts_data[puuid]
         with open(os.path.join(os.getenv('APPDATA'), "vry/accounts.json"), "w") as f:
             json.dump(self.accounts_data, f)
-        
+
     def add_account_with_client(self):
         subprocess.call("TASKKILL /F /IM RiotClientUx.exe", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(self.pritvate_settings, "w") as f:
             f.write("")
         time.sleep(3)
         subprocess.Popen([self.riot_client_path])
-        #watchdog wait for login
         last_modified = os.path.getmtime(self.pritvate_settings)
         while True:
             if os.path.getmtime(self.pritvate_settings) != last_modified:
@@ -173,15 +170,23 @@ class AccountConfig:
         subprocess.call("TASKKILL /F /IM RiotClientUx.exe", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(self.pritvate_settings, 'r') as f:
             yaml_data = yaml.safe_load(f)
-            try:
-                if len(yaml_data["riot-login"]["persist"]["session"]["cookies"]) == 5:
-                    for i, cookie in enumerate(yaml_data["riot-login"]["persist"]["session"]["cookies"]):
-                        yaml_data["riot-login"]["persist"]["session"]["cookies"][i]["value"] = account_data["cookies"].get(cookie["name"])
-            except TypeError:
-                yaml_data = self.create_yaml_config_file(account_data)
+        # BUG FIX: the `else` clause used to be on the try/except (running after
+        # a *successful* try), which meant it would overwrite the cookie update
+        # that had just succeeded.  It should be the `else` branch of the inner
+        # `if` statement instead.
+        try:
+            if len(yaml_data["riot-login"]["persist"]["session"]["cookies"]) == 5:
+                for i, cookie in enumerate(yaml_data["riot-login"]["persist"]["session"]["cookies"]):
+                    yaml_data["riot-login"]["persist"]["session"]["cookies"][i]["value"] = \
+                        account_data["cookies"].get(cookie["name"])
             else:
-                self.log(f'Account not logged in, incorrect amount of cookies, amount of cookies {len(yaml_data["riot-login"]["persist"]["session"]["cookies"])}')
+                self.log(
+                    f'Account not logged in, incorrect amount of cookies, '
+                    f'amount of cookies {len(yaml_data["riot-login"]["persist"]["session"]["cookies"])}'
+                )
                 yaml_data = self.create_yaml_config_file(account_data)
-                #need to create riotgamesprivatesettings.yaml file with content in it generated
+        except TypeError:
+            yaml_data = self.create_yaml_config_file(account_data)
+
         with open(self.pritvate_settings, "w") as f:
             yaml.dump(yaml_data, f)

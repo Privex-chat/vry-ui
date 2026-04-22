@@ -26,13 +26,13 @@ from colr import color as colr
 from InquirerPy import inquirer
 
 try:
-    from PySide6.QtCore import (Qt, QUrl, Signal, QThread, QTimer, 
+    from PySide6.QtCore import (Qt, QUrl, Signal, QThread, QTimer,
                                 QSettings, QObject, QDateTime)
-    from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, 
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget,
                                   QVBoxLayout, QHBoxLayout, QStackedWidget,
                                   QPushButton, QTextEdit, QLabel, QTabWidget,
                                   QSplitter, QStatusBar, QMenuBar,
-                                  QGroupBox, QGridLayout, QCheckBox, QMessageBox, 
+                                  QGroupBox, QGridLayout, QCheckBox, QMessageBox,
                                   QLineEdit, QTableWidget, QTableWidgetItem,
                                   QHeaderView, QComboBox, QColorDialog, QDialog,
                                   QDialogButtonBox, QSpinBox)
@@ -93,7 +93,7 @@ class LRUCache:
         self.cache = OrderedDict()
         self.maxsize = maxsize
         self.ttl = ttl  # seconds
-    
+
     def get(self, key):
         if key in self.cache:
             value, timestamp = self.cache[key]
@@ -103,14 +103,14 @@ class LRUCache:
             else:
                 del self.cache[key]
         return None
-    
+
     def set(self, key, value):
         if key in self.cache:
             del self.cache[key]
         elif len(self.cache) >= self.maxsize:
             self.cache.popitem(last=False)
         self.cache[key] = (value, time.time())
-    
+
     def invalidate(self, key=None):
         if key:
             self.cache.pop(key, None)
@@ -119,7 +119,7 @@ class LRUCache:
 
 
 class Theme:
-    def __init__(self, name, background, text, border, alternate, selection, header, 
+    def __init__(self, name, background, text, border, alternate, selection, header,
                  table_bg, table_text, table_grid, status_bg, accent):
         self.name = name
         self.background = background
@@ -136,7 +136,7 @@ class Theme:
 
 
 THEMES = {
-    "Dark": Theme("Dark", "#1a1a1a", "#e0e0e0", "#333333", "#252525", "#3d3d3d", 
+    "Dark": Theme("Dark", "#1a1a1a", "#e0e0e0", "#333333", "#252525", "#3d3d3d",
                   "#2b2b2b", "#1e1e1e", "#ffffff", "#2a2a2a", "#007acc", "#007acc"),
     "Light": Theme("Light", "#f5f5f5", "#333333", "#cccccc", "#e8e8e8", "#d0e3ff",
                    "#e0e0e0", "#ffffff", "#000000", "#dddddd", "#0078d4", "#0078d4"),
@@ -148,13 +148,13 @@ THEMES = {
 
 
 class VRYWorkerThread(QThread):
-    
+
     output_signal = Signal(str)
     error_signal = Signal(str)
     table_update_signal = Signal(list, dict)
     table_row_signal = Signal(dict, dict)
     status_signal = Signal(str, str)
-    
+
     def __init__(self, verbose_level=0):
         super().__init__()
         self.running = False
@@ -164,68 +164,68 @@ class VRYWorkerThread(QThread):
         self.verbose_level = verbose_level
         self.loop = None
         self.freeze_table = False
-        
+
         # Caching
         self.player_cache = LRUCache(maxsize=64, ttl=60)
         self.pregame_players_cache = {}  # Cache pregame data for ingame reuse
         self.last_match_id = None
-        
+
         # Shutdown coordination
         self._shutdown_event = threading.Event()
-        
+
     def set_freeze_state(self, frozen):
         self.freeze_table = frozen
-        
+
     def initialize_vry(self):
         try:
             self.Logging = Logging()
             self.log = self.Logging.log
-            
+
             if self.verbose_level > 0:
                 self.output_signal.emit(f"OS: {get_os()}\n")
-            
+
             self.acc_manager = AccountManager(self.log, AccountConfig, AccountAuth, NUMBERTORANKS)
             self.ErrorSRC = Error(self.log, self.acc_manager)
-            
+
             Requests.check_version(version, Requests.copy_run_update_script)
             Requests.check_status()
             self.Requests = Requests(version, self.log, self.ErrorSRC)
-            
+
             self.cfg = Config(self.log)
             self.content = Content(self.Requests, self.log)
-            
+
             self.rank = Rank(self.Requests, self.log, self.content, before_ascendant_seasons)
             self.pstats = PlayerStats(self.Requests, self.log, self.cfg)
             self.namesClass = Names(self.Requests, self.log)
             self.presences = Presences(self.Requests, self.log)
-            
+
             self.menu = Menu(self.Requests, self.log, self.presences)
             self.pregame = Pregame(self.Requests, self.log)
             self.coregame = Coregame(self.Requests, self.log)
-            
+
             self.Server = Server(self.log, self.ErrorSRC)
             self.Server.start_server()
-            
+
             self.agent_dict = self.content.get_all_agents()
-            
+
             map_info = self.content.get_all_maps()
             self.map_urls = self.content.get_map_urls(map_info)
             self.map_splashes = self.content.get_map_splashes(map_info)
-            
+
             self.current_map = self.coregame.get_current_map(self.map_urls, self.map_splashes)
-            
+
             self.colors = Colors(hide_names, self.agent_dict, AGENTCOLORLIST)
-            
-            self.loadoutsClass = Loadouts(self.Requests, self.log, self.colors, 
+
+            self.loadoutsClass = Loadouts(self.Requests, self.log, self.colors,
                                          self.Server, self.current_map)
             self.table = Table(self.cfg, self.log)
             self.stats = Stats()
-            
+
             self.rpc = Rpc(self.map_urls, gamemodes, self.colors, self.log) if self.cfg.get_feature_flag("discord_rpc") else None
-            
-            self.Wss = Ws(self.Requests.lockfile, self.Requests, self.cfg, 
+
+            self.Wss = Ws(self.Requests.lockfile, self.Requests, self.cfg,
                          self.colors, hide_names, self.Server, self.rpc)
-            
+
             # Cache static API data
             self.valoApiSkins = requests.get("https://valorant-api.com/v1/weapons/skins", timeout=10)
             self.gameContent = self.content.get_content()
@@ -233,19 +233,19 @@ class VRYWorkerThread(QThread):
             self.previousSeasonID = self.content.get_previous_season_id(self.gameContent)
             self.seasonActEp = self.content.get_act_episode_from_act_id(self.seasonID) if self.seasonID else {"act": None, "episode": None}
             self.previousSeasonActEp = self.content.get_act_episode_from_act_id(self.previousSeasonID) if self.previousSeasonID else {"act": None, "episode": None}
-            
+
             self.initialized = True
             self.output_signal.emit(f"VRY Mobile - {self.get_ip()}:{self.cfg.port}")
-            
+
         except Exception as e:
             self.error_signal.emit(f"Init error: {str(e)}")
             if self.verbose_level > 1:
                 self.log(traceback.format_exc())
-    
+
     def log(self, message):
         if self.verbose_level > 1:
             self.output_signal.emit(f"[DEBUG] {message}")
-            
+
     def get_ip(self):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -256,30 +256,30 @@ class VRYWorkerThread(QThread):
             return IP
         except Exception:
             return "127.0.0.1"
-    
+
     def send_heartbeat(self, heartbeat_data):
         try:
             if hasattr(self, 'Server') and self.Server:
                 self.Server.send_payload("heartbeat", heartbeat_data)
         except Exception:
             pass
-    
+
     def run(self):
         self.running = True
         self._shutdown_event.clear()
-        
+
         # Create dedicated event loop for this thread
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        
+
         try:
             if not self.initialized:
                 self.initialize_vry()
-                
+
             if not self.initialized:
                 self.error_signal.emit("Failed to initialize VRY")
                 return
-            
+
             while self.running and not self._shutdown_event.is_set():
                 try:
                     self.process_game_state()
@@ -290,18 +290,18 @@ class VRYWorkerThread(QThread):
                         self.error_signal.emit(f"Processing error: {str(e)}")
                     if self.verbose_level > 1:
                         self.log(traceback.format_exc())
-                
+
                 # Interruptible sleep
                 for _ in range(20):
                     if not self.running or self._shutdown_event.is_set():
                         break
                     self.msleep(100)
-                    
+
         except Exception as e:
             self.error_signal.emit(f"Thread error: {str(e)}")
         finally:
             self._cleanup_loop()
-    
+
     def _cleanup_loop(self):
         """Safely cleanup the event loop"""
         if self.loop and not self.loop.is_closed():
@@ -310,42 +310,42 @@ class VRYWorkerThread(QThread):
                 pending = asyncio.all_tasks(self.loop)
                 for task in pending:
                     task.cancel()
-                
+
                 # Give tasks time to cancel
                 if pending:
                     self.loop.run_until_complete(
                         asyncio.gather(*pending, return_exceptions=True)
                     )
-                    
+
                 self.loop.run_until_complete(self.loop.shutdown_asyncgens())
                 self.loop.close()
             except Exception:
                 pass
             finally:
                 self.loop = None
-                
+
     def process_game_state(self):
         if self._shutdown_event.is_set():
             return
-            
+
         try:
             if self.firstTime:
                 self._wait_for_initial_presence()
                 self.firstTime = False
             else:
                 self._wait_for_state_change()
-            
+
             if self.freeze_table or self._shutdown_event.is_set():
                 return
-            
+
             presence = self.presences.get_presence()
             priv_presence = self.presences.get_private_presence(presence)
-            
+
             if not priv_presence:
                 return
-            
+
             gamemode = self._get_gamemode(priv_presence)
-            
+
             table_data = []
             metadata = {"state": self.game_state, "mode": gamemode}
             heartbeat_data = {
@@ -355,7 +355,7 @@ class VRYWorkerThread(QThread):
                 "puuid": self.Requests.puuid,
                 "players": {},
             }
-            
+
             try:
                 if self.game_state == "INGAME":
                     table_data, metadata, heartbeat_data = self.process_ingame_state(presence, heartbeat_data)
@@ -369,14 +369,14 @@ class VRYWorkerThread(QThread):
                 self.error_signal.emit(f"Error processing {self.game_state}: {str(e)}")
                 if self.verbose_level > 1:
                     self.log(traceback.format_exc())
-            
+
             self.status_signal.emit(self.game_state, gamemode)
-            
+
             if table_data:
                 self.table_update_signal.emit(table_data, metadata)
-                
+
             self.send_heartbeat(heartbeat_data)
-                
+
         except Exception as e:
             if self.verbose_level > 0:
                 self.error_signal.emit(f"State error: {str(e)}")
@@ -387,7 +387,7 @@ class VRYWorkerThread(QThread):
         while self.running and not self._shutdown_event.is_set():
             presence = self.presences.get_presence()
             private_presence = self.presences.get_private_presence(presence)
-            
+
             if private_presence:
                 if self.rpc:
                     self.rpc.set_rpc(private_presence)
@@ -395,7 +395,7 @@ class VRYWorkerThread(QThread):
                 if self.game_state:
                     self.log(f"Initial state: {self.game_state}")
                     return
-            
+
             for _ in range(20):
                 if not self.running or self._shutdown_event.is_set():
                     return
@@ -406,9 +406,9 @@ class VRYWorkerThread(QThread):
         if not self.loop or self.loop.is_closed():
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
-        
+
         previous_state = self.game_state
-        
+
         try:
             self.game_state = self.loop.run_until_complete(
                 self.Wss.recconect_to_websocket(self.game_state)
@@ -422,7 +422,7 @@ class VRYWorkerThread(QThread):
         except Exception as e:
             self.log(f"Websocket error: {e}")
             return
-        
+
         if previous_state != self.game_state:
             self.log(f"State change: {previous_state} -> {self.game_state}")
             if self.game_state == "MENUS":
@@ -432,15 +432,15 @@ class VRYWorkerThread(QThread):
                 self.namesClass.clear_incognito_cache()
 
     def _get_gamemode(self, priv_presence):
-        if priv_presence["provisioningFlow"] == "CustomGame" or \
-           priv_presence["partyPresenceData"]["partyState"] == "CUSTOM_GAME_SETUP":
+        if priv_presence.get("provisioningFlow") == "CustomGame" or \
+           (priv_presence.get("partyPresenceData") or {}).get("partyState") == "CUSTOM_GAME_SETUP":
             return "Custom Game"
-        return gamemodes.get(priv_presence["queueId"], "Unknown")
+        return gamemodes.get(priv_presence.get("queueId", ""), "Unknown")
 
     def _get_cached_player_data(self, puuid):
         """Get cached player data if available"""
         return self.player_cache.get(puuid)
-    
+
     def _cache_player_data(self, puuid, data):
         """Cache player data"""
         self.player_cache.set(puuid, data)
@@ -448,22 +448,23 @@ class VRYWorkerThread(QThread):
     def process_ingame_state(self, presence, heartbeat_data):
         table_data = []
         metadata = {"state": "INGAME", "clear_table": True}
-        
+
         coregame_stats = self.coregame.get_coregame_stats()
-        if not coregame_stats:
+        # Guard against None, errorCode responses, or missing Players key
+        if not coregame_stats or "errorCode" in coregame_stats or "Players" not in coregame_stats:
             return table_data, metadata, heartbeat_data
-        
+
         self.table_update_signal.emit([], metadata)
-        
+
         Players = coregame_stats["Players"]
         match_id = self.coregame.get_coregame_match_id()
-        
+
         # Check if this is same match as pregame
         reuse_pregame = (self.last_match_id == match_id and self.pregame_players_cache)
-        
+
         partyMembers = self.menu.get_party_members(self.Requests.puuid, presence)
         partyMembersList = [a["Subject"] for a in partyMembers]
-        
+
         # Set up player data for websocket
         players_data = {"ignore": partyMembersList}
         for player in Players:
@@ -475,10 +476,10 @@ class VRYWorkerThread(QThread):
                 "streamer_mode": player["PlayerIdentity"]["Incognito"]
             }
         self.Wss.set_player_data(players_data)
-        
+
         self.presences.wait_for_presence(self.namesClass.get_players_puuid(Players))
         names = self.namesClass.get_names_from_puuids(Players)
-        
+
         # Get loadouts
         try:
             loadouts_arr = self.loadoutsClass.get_match_loadouts(
@@ -489,31 +490,30 @@ class VRYWorkerThread(QThread):
         except Exception as e:
             self.log(f"Loadouts error: {e}")
             loadouts, loadouts_data = {}, {}
-        
-        # Sort: by level desc, then by team (allies first)
+
+        # Sort: allies first, then enemies
         allyTeam = None
         for p in Players:
             if p["Subject"] == self.Requests.puuid:
                 allyTeam = p["TeamID"]
                 break
-        
-        # Keep original API order within teams but group by team
+
         ally_players = [p for p in Players if p["TeamID"] == allyTeam]
         enemy_players = [p for p in Players if p["TeamID"] != allyTeam]
         Players = ally_players + enemy_players
-        
+
         partyOBJ = self.menu.get_party_json(self.namesClass.get_players_puuid(Players), presence)
         partyIcons = {}
         partyCount = 0
-        
+
         heartbeat_data["map"] = self.map_urls.get(coregame_stats["MapID"].lower(), "")
-        
+
         for player in Players:
             if not self.running or self.freeze_table:
                 break
-            
+
             puuid = player["Subject"]
-            
+
             # Party icon
             party_icon, partyNum = "", 0
             for party in partyOBJ:
@@ -523,12 +523,12 @@ class VRYWorkerThread(QThread):
                         partyCount += 1
                     party_icon = partyIcons[party]
                     partyNum = partyCount
-            
+
             agent_name = self.agent_dict.get(player["CharacterID"].lower(), "Unknown")
-            
+
             # Try to reuse pregame data for allies
             cached_data = self.pregame_players_cache.get(puuid) if reuse_pregame and player["TeamID"] == allyTeam else None
-            
+
             if cached_data:
                 playerRank = cached_data["rank_data"]
                 previousPlayerRank = cached_data["prev_rank_data"]
@@ -537,23 +537,23 @@ class VRYWorkerThread(QThread):
                 playerRank = self.rank.get_rank(puuid, self.seasonID)
                 previousPlayerRank = self.rank.get_rank(puuid, self.previousSeasonID)
                 ppstats = self.pstats.get_stats(puuid)
-            
+
             row_data = self._build_row_data(
                 player, names, party_icon, agent_name, loadouts,
                 playerRank, previousPlayerRank, ppstats,
                 partyMembersList, allyTeam
             )
-            
+
             if not self.freeze_table:
                 self.table_row_signal.emit(row_data, metadata)
-            
+
             table_data.append(row_data)
-            
+
             # Build heartbeat player data
             heartbeat_data["players"][puuid] = self._build_heartbeat_player(
                 player, names, partyNum, playerRank, ppstats, loadouts_data
             )
-            
+
             # Save stats
             self.stats.save_data({
                 puuid: {
@@ -566,50 +566,51 @@ class VRYWorkerThread(QThread):
                     "epoch": time.time()
                 }
             })
-        
+
         return table_data, metadata, heartbeat_data
 
     def process_pregame_state(self, presence, heartbeat_data):
         table_data = []
         metadata = {"state": "PREGAME", "clear_table": True}
-        
+
         pregame_stats = self.pregame.get_pregame_stats()
-        if not pregame_stats:
+        # Guard against None, errorCode responses, or missing AllyTeam key
+        if not pregame_stats or "errorCode" in pregame_stats or "AllyTeam" not in pregame_stats:
             return table_data, metadata, heartbeat_data
-        
+
         # Cache match ID for ingame reuse
         self.last_match_id = self.pregame.get_pregame_match_id()
-        
+
         if self.cfg.get_feature_flag("starting_side"):
             team_id = pregame_stats.get("AllyTeam", {}).get("TeamID")
             if team_id:
                 metadata["starting_side"] = "Attacker" if team_id == "Red" else "Defender"
-        
+
         self.table_update_signal.emit([], metadata)
-        
+
         Players = pregame_stats["AllyTeam"]["Players"]
         self.presences.wait_for_presence(self.namesClass.get_players_puuid(Players))
         names = self.namesClass.get_names_from_puuids(Players)
-        
+
         partyMembers = self.menu.get_party_members(self.Requests.puuid, presence)
         partyMembersList = [a["Subject"] for a in partyMembers]
         partyOBJ = self.menu.get_party_json(self.namesClass.get_players_puuid(Players), presence)
-        
+
         partyIcons = {}
         partyCount = 0
-        
+
         teams = pregame_stats.get("Teams", [])
         team_id = teams[0]["TeamID"] if teams else None
-        
+
         # Clear and rebuild pregame cache
         self.pregame_players_cache.clear()
-        
+
         for player in Players:
             if not self.running or self.freeze_table:
                 break
-            
+
             puuid = player["Subject"]
-            
+
             party_icon, partyNum = "", 0
             for party in partyOBJ:
                 if puuid in partyOBJ[party]:
@@ -618,13 +619,13 @@ class VRYWorkerThread(QThread):
                         partyCount += 1
                     party_icon = partyIcons[party]
                     partyNum = partyCount
-            
+
             agent_name = self.agent_dict.get(player["CharacterID"].lower(), "Unknown")
-            
+
             playerRank = self.rank.get_rank(puuid, self.seasonID)
             previousPlayerRank = self.rank.get_rank(puuid, self.previousSeasonID)
             ppstats = self.pstats.get_stats(puuid)
-            
+
             # Cache for ingame reuse
             self.pregame_players_cache[puuid] = {
                 "rank_data": playerRank,
@@ -632,7 +633,7 @@ class VRYWorkerThread(QThread):
                 "stats": ppstats,
                 "name": names[puuid]
             }
-            
+
             row_data = {
                 "puuid": puuid,
                 "party": party_icon,
@@ -666,12 +667,12 @@ class VRYWorkerThread(QThread):
                 "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
-            
+
             if not self.freeze_table:
                 self.table_row_signal.emit(row_data, metadata)
-            
+
             table_data.append(row_data)
-            
+
             heartbeat_data["players"][puuid] = {
                 "name": names[puuid],
                 "partyNumber": partyNum if party_icon else 0,
@@ -685,29 +686,29 @@ class VRYWorkerThread(QThread):
                 "headshotPercentage": ppstats["hs"],
                 "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
             }
-        
+
         return table_data, metadata, heartbeat_data
 
     def process_menu_state(self, presence, heartbeat_data):
         table_data = []
         metadata = {"state": "MENUS", "clear_table": True}
-        
+
         self.table_update_signal.emit([], metadata)
-        
+
         Players = self.menu.get_party_members(self.Requests.puuid, presence)
         names = self.namesClass.get_names_from_puuids(Players)
-        
+
         seen = set()
         for player in Players:
             puuid = player["Subject"]
             if puuid in seen or self.freeze_table:
                 continue
             seen.add(puuid)
-            
+
             playerRank = self.rank.get_rank(puuid, self.seasonID)
             previousPlayerRank = self.rank.get_rank(puuid, self.previousSeasonID)
             ppstats = self.pstats.get_stats(puuid)
-            
+
             row_data = {
                 "puuid": puuid,
                 "party": PARTYICONLIST[0],
@@ -739,12 +740,12 @@ class VRYWorkerThread(QThread):
                 "earned_rr": ppstats.get("RankedRatingEarned", "N/A"),
                 "afk_penalty": ppstats.get("AFKPenalty", "N/A")
             }
-            
+
             if not self.freeze_table:
                 self.table_row_signal.emit(row_data, metadata)
-            
+
             table_data.append(row_data)
-            
+
             heartbeat_data["players"][puuid] = {
                 "name": names[puuid],
                 "rank": playerRank["rank"],
@@ -756,7 +757,7 @@ class VRYWorkerThread(QThread):
                 "headshotPercentage": ppstats["hs"],
                 "winPercentage": f"{playerRank['wr']} ({playerRank['numberofgames']})",
             }
-        
+
         return table_data, metadata, heartbeat_data
 
     def _build_row_data(self, player, names, party_icon, agent_name, loadouts,
@@ -818,38 +819,38 @@ class VRYWorkerThread(QThread):
             "playerCard": loadouts_data.get("Players", {}).get(puuid, {}).get("PlayerCard"),
             "weapons": loadouts_data.get("Players", {}).get(puuid, {}).get("Weapons"),
         }
-    
+
     def stop(self):
         """Gracefully stop the worker thread"""
         self.running = False
         self._shutdown_event.set()
-        
+
         # Signal websocket to close
         if hasattr(self, "Wss") and self.Wss:
             self.Wss.request_shutdown()
-        
+
         # Give websocket time to close gracefully
         time.sleep(0.5)
-        
+
         # Cleanup resources
         try:
             if hasattr(self, "Wss") and self.Wss:
                 self.Wss.close()
         except Exception:
             pass
-        
+
         try:
             if hasattr(self, "Server") and self.Server:
                 self.Server.stop_server()
         except Exception:
             pass
-        
+
         try:
             if hasattr(self, "rpc") and self.rpc:
                 self.rpc.close()
         except Exception:
             pass
-        
+
         try:
             if hasattr(self, "loadoutsClass") and self.loadoutsClass:
                 self.loadoutsClass.close()
@@ -858,13 +859,16 @@ class VRYWorkerThread(QThread):
 
 
 class VRYTableWidget(QTableWidget):
-    
+
     def __init__(self):
         super().__init__()
         self.current_theme = THEMES["Dark"]
         self.is_frozen = False
+        # Track whether the enemy-team separator has been inserted for the
+        # current streaming batch so we only insert it once.
+        self._separator_added = False
         self.setup_table()
-        
+
     def setup_table(self):
         self.setColumnCount(14)
         headers = ["Party", "Agent", "Name", "Skin", "Rank", "RR",
@@ -892,7 +896,6 @@ class VRYTableWidget(QTableWidget):
         if row < 0:
             return
 
-        # Get puuid from hidden data stored in party column (column 0)
         name_item = self.item(row, 2)
         puuid_item = self.item(row, 0)
         if not puuid_item:
@@ -928,7 +931,6 @@ class VRYTableWidget(QTableWidget):
         menu.exec(self.viewport().mapToGlobal(pos))
 
     def _open_vtl(self, puuid, name_text):
-        # Find the parent main window to navigate VTL tab
         parent = self.parent()
         while parent and not isinstance(parent, QMainWindow):
             parent = parent.parent()
@@ -963,10 +965,10 @@ class VRYTableWidget(QTableWidget):
                 font-weight: bold;
             }}
         """)
-    
+
     def freeze_table(self, freeze):
         self.is_frozen = freeze
-    
+
     def add_separator_row(self):
         """Insert a thin visual divider between ally and enemy sections."""
         row_position = self.rowCount()
@@ -979,36 +981,42 @@ class VRYTableWidget(QTableWidget):
             self.setItem(row_position, col, item)
 
     def add_row_streaming(self, row_data, metadata):
+        """Append a single row during progressive streaming.
+
+        The table is cleared by update_table([], metadata) *before* streaming
+        begins, so we never clear here.  We only manage the separator flag.
+        """
         if self.is_frozen:
             return
-        if metadata.get("clear_table") and self.rowCount() == 0:
-            pass  # already cleared by update_table or first row
-        elif metadata.get("clear_table") and metadata.get("_row_index", 0) == 0:
-            self.setRowCount(0)
 
-        # Insert separator before first enemy row in INGAME
+        # Insert separator before the first enemy row in INGAME state.
+        # _separator_added is reset in update_table() so it starts False for
+        # every new streaming batch.
         if (metadata.get("state") == "INGAME"
                 and not row_data.get("is_self")
                 and not row_data.get("is_party")
                 and row_data.get("team") != row_data.get("ally_team")
-                and not metadata.get("_separator_added")):
-            metadata["_separator_added"] = True
+                and not self._separator_added):
+            self._separator_added = True
             self.add_separator_row()
 
         row_position = self.rowCount()
         self.insertRow(row_position)
         self._populate_row(row_position, row_data, metadata)
-        
+
     def update_table(self, data, metadata):
+        """Full-replace render.  Also resets streaming state."""
         if self.is_frozen:
             return
+        # Reset separator flag so the next streaming batch starts fresh.
+        self._separator_added = False
         self.setRowCount(0)
         for row_data in data:
             row_position = self.rowCount()
             self.insertRow(row_position)
             self._populate_row(row_position, row_data, metadata)
         self._update_column_visibility(metadata)
-    
+
     def _populate_row(self, row_position, row_data, metadata):
         def parse_ansi(raw):
             if raw is None:
@@ -1024,7 +1032,7 @@ class VRYTableWidget(QTableWidget):
                 except Exception:
                     pass
             return item
-        
+
         def format_rank(rank_text, act, ep):
             if not rank_text or "Unranked" in str(rank_text):
                 return rank_text
@@ -1057,7 +1065,6 @@ class VRYTableWidget(QTableWidget):
         name_val = str(row_data.get("name", ""))
         if incognito and not is_self and not is_party:
             if not name_val:
-                # vtl.lol failed — show agent name as italic gray fallback
                 agent_val = ANSI_ANY_RE.sub("", str(row_data.get("agent", ""))) or "???"
                 item = QTableWidgetItem(agent_val)
                 _f = QFont("Segoe UI", 9)
@@ -1065,12 +1072,10 @@ class VRYTableWidget(QTableWidget):
                 item.setFont(_f)
                 item.setForeground(QColor(120, 120, 120))
             elif privacy:
-                # vtl.lol resolved but privacy on — hide identity
                 item = QTableWidgetItem("Incognito")
                 item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
                 item.setForeground(QColor(128, 0, 0))
             else:
-                # vtl.lol resolved and privacy off — show real name with asterisk marker
                 item = parse_ansi("*" + name_val)
                 item.setForeground(QColor(200, 200, 200))
         else:
@@ -1106,7 +1111,7 @@ class VRYTableWidget(QTableWidget):
         prev_text = format_rank(row_data.get("previous_rank", ""), row_data.get("previous_act"), row_data.get("previous_ep"))
         self.setItem(row_position, 7, parse_ansi(prev_text))
 
-        # Leaderboard — gold # prefix for ranked players
+        # Leaderboard
         lb = row_data.get("leaderboard", 0)
         if lb and lb > 0:
             item = QTableWidgetItem(f"#{lb}")
@@ -1116,7 +1121,7 @@ class VRYTableWidget(QTableWidget):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 8, item)
 
-        # HS% — color gradient: <20 dark red, 20-30 yellow, 30+ green
+        # HS%
         hs = row_data.get("hs", "N/A")
         if hs != "N/A":
             try:
@@ -1135,7 +1140,7 @@ class VRYTableWidget(QTableWidget):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 9, item)
 
-        # WR% — color: <45 red, 45-55 white, >55 green
+        # WR%
         wr = row_data.get("wr", "N/A")
         games = row_data.get("games", 0)
         if wr not in ("N/A", "N/a"):
@@ -1155,7 +1160,7 @@ class VRYTableWidget(QTableWidget):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 10, item)
 
-        # K/D — color: <0.8 red, 0.8-1.2 white, >1.2 green, >2.0 gold
+        # K/D
         kd = row_data.get("kd", "N/A")
         if kd != "N/A":
             try:
@@ -1199,17 +1204,17 @@ class VRYTableWidget(QTableWidget):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row_position, 13, item)
 
-        # Row background tinting and self-row bold
+        # Row background tinting
         is_ally = (
             row_data.get("is_self") or
             row_data.get("is_party") or
             (row_data.get("team") == row_data.get("ally_team")) or
-            row_data.get("team") is None  # MENUS / PREGAME
+            row_data.get("team") is None
         )
         if is_ally:
-            row_bg = QColor(0, 60, 20, 50)    # subtle green tint
+            row_bg = QColor(0, 60, 20, 50)
         else:
-            row_bg = QColor(80, 0, 0, 50)     # subtle red tint
+            row_bg = QColor(80, 0, 0, 50)
 
         bold_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
         normal_font = QFont("Segoe UI", 9)
@@ -1222,7 +1227,7 @@ class VRYTableWidget(QTableWidget):
                     cell.setFont(bold_font)
                 else:
                     cell.setFont(normal_font)
-    
+
     def _update_column_visibility(self, metadata):
         state = metadata.get("state", "")
         self.setColumnHidden(0, state == "MENUS")
@@ -1231,10 +1236,10 @@ class VRYTableWidget(QTableWidget):
 
 
 class VRYMainWindow(QMainWindow):
-    
+
     def __init__(self):
         super().__init__()
-        
+
         self.settings = QSettings("VRY", "VRY-UI-v2")
         self.current_theme = THEMES["Dark"]
         self.worker_thread = None
@@ -1242,25 +1247,26 @@ class VRYMainWindow(QMainWindow):
         self.player_table_metadata = {}
         self.matchloadouts_web = None
         self.vtl_web = None
-        
+        self.vtl_search = None  # Initialised here; populated in toggle_vtl_tab
+
         self.config = Config(None)
         self.show_resource_warning = self.config.get_feature_flag("show_resource_warning")
         self._last_status_time = time.time()
 
         self.init_ui()
         self.load_settings()
-        
+
         if PSUTIL_AVAILABLE and self.show_resource_warning:
             self.resource_timer = QTimer()
             self.resource_timer.timeout.connect(self.monitor_resources)
-            self.resource_timer.start(60000)  # Check every minute
+            self.resource_timer.start(60000)
 
         self._watchdog_timer = QTimer(self)
         self._watchdog_timer.timeout.connect(self._check_worker_watchdog)
-        self._watchdog_timer.start(30000)  # Check every 30s
+        self._watchdog_timer.start(30000)
 
         QTimer.singleShot(100, self.start_vry)
-    
+
     def monitor_resources(self):
         if not PSUTIL_AVAILABLE:
             return
@@ -1272,34 +1278,34 @@ class VRYMainWindow(QMainWindow):
                     f"Memory: {mem.percent:.1f}%\nCPU: {cpu:.1f}%")
         except Exception:
             pass
-    
+
     def init_ui(self):
         self.setWindowTitle("VRY - UI v2.15")
         self.setGeometry(100, 100, 1400, 850)
         self.setWindowIcon(QIcon("icon.ico"))
         self.setFont(QFont("Segoe UI", 9))
-        
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
+
         self.create_menu_bar()
-        
+
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         main_layout.addWidget(self.tabs)
-        
+
         # VRY Tab
         vry_widget = QWidget()
         vry_layout = QVBoxLayout(vry_widget)
         vry_layout.setContentsMargins(10, 10, 10, 10)
-        
+
         status_panel = QWidget()
         status_layout = QHBoxLayout(status_panel)
         status_layout.setContentsMargins(0, 0, 0, 10)
-        
+
         # Animated polling dot
         self._dot_state = True
         self._dot_timer = QTimer(self)
@@ -1319,32 +1325,31 @@ class VRYMainWindow(QMainWindow):
         )
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
-        
+
         self.freeze_btn = QPushButton("Freeze Table")
         self.freeze_btn.setCheckable(True)
         self.freeze_btn.setMaximumWidth(140)
         self.freeze_btn.clicked.connect(self.toggle_freeze)
         status_layout.addWidget(self.freeze_btn)
-        
+
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setMaximumWidth(100)
         self.refresh_btn.clicked.connect(self.refresh_data)
         status_layout.addWidget(self.refresh_btn)
-        
+
         vry_layout.addWidget(status_panel)
-        
+
         self.player_table = VRYTableWidget()
         vry_layout.addWidget(self.player_table)
-        
+
         self.tabs.addTab(vry_widget, "Players")
-        
+
         # Console (hidden by default)
         self.console_widget = QWidget()
         console_layout = QVBoxLayout(self.console_widget)
         console_layout.setContentsMargins(4, 4, 4, 4)
         console_layout.setSpacing(4)
 
-        # Console toolbar
         console_toolbar = QHBoxLayout()
         console_toolbar.addWidget(QLabel("Verbosity:"))
         self._verbosity_combo = QComboBox()
@@ -1370,30 +1375,30 @@ class VRYMainWindow(QMainWindow):
         self._console_auto_scroll = True
         self.console_output.verticalScrollBar().valueChanged.connect(self._on_console_scroll)
         console_layout.addWidget(self.console_output)
-        
+
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
-        
+
         self.apply_theme(self.current_theme)
-    
+
     def toggle_freeze(self, checked):
         self.player_table.freeze_table(checked)
         if self.worker_thread:
             self.worker_thread.set_freeze_state(checked)
-        
+
         self.freeze_btn.setText("Unfreeze Table" if checked else "Freeze Table")
         self.freeze_btn.setStyleSheet(
             "QPushButton { background-color: #4a90e2; color: white; font-weight: bold; }" if checked else ""
         )
         self.status_bar.showMessage(f"Table {'frozen' if checked else 'unfrozen'}", 3000)
-    
+
     def create_menu_bar(self):
         menubar = self.menuBar()
-        
+
         # File menu
         file_menu = menubar.addMenu('File')
-        
+
         refresh = QAction('Refresh Data', self)
         refresh.setShortcut('F5')
         refresh.triggered.connect(self.refresh_data)
@@ -1410,10 +1415,10 @@ class VRYMainWindow(QMainWindow):
         exit_action.setShortcut('Ctrl+Q')
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
+
         # View menu
         view_menu = menubar.addMenu('View')
-        
+
         theme_menu = view_menu.addMenu('Theme')
         self.theme_group = []
         for name in THEMES:
@@ -1422,25 +1427,25 @@ class VRYMainWindow(QMainWindow):
             action.triggered.connect(lambda c, t=name: self.change_theme(t))
             theme_menu.addAction(action)
             self.theme_group.append(action)
-        
+
         view_menu.addSeparator()
-        
+
         self.toggle_matchloadouts = QAction('Match Loadouts Tab', self)
         self.toggle_matchloadouts.setCheckable(True)
         self.toggle_matchloadouts.setChecked(True)
         self.toggle_matchloadouts.triggered.connect(self.toggle_matchloadouts_tab)
         view_menu.addAction(self.toggle_matchloadouts)
-        
+
         self.toggle_vtl = QAction('VTL.lol Tab', self)
         self.toggle_vtl.setCheckable(True)
         self.toggle_vtl.triggered.connect(self.toggle_vtl_tab)
         view_menu.addAction(self.toggle_vtl)
-        
+
         self.toggle_console = QAction('Console Tab', self)
         self.toggle_console.setCheckable(True)
         self.toggle_console.triggered.connect(self.toggle_console_tab)
         view_menu.addAction(self.toggle_console)
-        
+
         compact_action = QAction('Compact Mode', self)
         compact_action.setCheckable(True)
         compact_action.triggered.connect(self.toggle_compact_mode)
@@ -1470,7 +1475,7 @@ class VRYMainWindow(QMainWindow):
         cycle_theme_sc.setShortcut('Ctrl+T')
         cycle_theme_sc.triggered.connect(self._cycle_theme)
         self.addAction(cycle_theme_sc)
-    
+
     def apply_theme(self, theme):
         self.current_theme = theme
         self.setStyleSheet(f"""
@@ -1487,17 +1492,17 @@ class VRYMainWindow(QMainWindow):
             QTextEdit {{ background-color: {theme.table_bg}; color: {theme.text}; border: 1px solid {theme.border}; }}
             QLineEdit {{ background-color: {theme.table_bg}; color: {theme.text}; border: 1px solid {theme.border}; padding: 5px; }}
         """)
-        
+
         if hasattr(self, 'player_table'):
             self.player_table.apply_theme(theme)
-    
+
     def change_theme(self, name):
         if name in THEMES:
             self.apply_theme(THEMES[name])
             self.settings.setValue("theme", name)
             for action in self.theme_group:
                 action.setChecked(action.text() == name)
-    
+
     def toggle_console_tab(self, checked):
         if checked:
             if self.tabs.indexOf(self.console_widget) == -1:
@@ -1507,7 +1512,7 @@ class VRYMainWindow(QMainWindow):
             if idx != -1:
                 self.tabs.removeTab(idx)
         self.settings.setValue("show_console", checked)
-    
+
     def toggle_matchloadouts_tab(self, checked):
         if checked and not self.matchloadouts_web:
             if OPTIMIZED_WEBVIEW_AVAILABLE:
@@ -1524,36 +1529,36 @@ class VRYMainWindow(QMainWindow):
                 self.matchloadouts_web.cleanup()
             self.matchloadouts_web = None
         self.settings.setValue("show_matchloadouts", checked)
-    
+
     def toggle_vtl_tab(self, checked):
         if checked and not self.vtl_web:
             container = QWidget()
             layout = QVBoxLayout(container)
             layout.setContentsMargins(0, 0, 0, 0)
-            
+
             search_layout = QHBoxLayout()
             search_layout.setContentsMargins(10, 10, 10, 10)
             search_layout.addWidget(QLabel("Lookup:"))
-            
+
             self.vtl_search = QLineEdit()
             self.vtl_search.setPlaceholderText("Username#Tag")
             self.vtl_search.setMaximumWidth(300)
             self.vtl_search.returnPressed.connect(self.search_vtl)
             search_layout.addWidget(self.vtl_search)
-            
+
             btn = QPushButton("Search")
             btn.clicked.connect(self.search_vtl)
             search_layout.addWidget(btn)
             search_layout.addStretch()
-            
+
             search_widget = QWidget()
             search_widget.setLayout(search_layout)
             layout.addWidget(search_widget, 0)
-            
+
             self.vtl_web = QWebEngineView()
             self.vtl_web.setHtml(f"<html><body style='background:{self.current_theme.background};color:{self.current_theme.text};display:flex;justify-content:center;align-items:center;height:100vh;font-family:Segoe UI'><div>Search a user to get started</div></body></html>")
             layout.addWidget(self.vtl_web, 1)
-            
+
             self.vtl_container = container
             self.tabs.addTab(container, "VTL.lol")
         elif not checked and self.vtl_web:
@@ -1565,7 +1570,7 @@ class VRYMainWindow(QMainWindow):
             self.vtl_web = None
             self.vtl_search = None
         self.settings.setValue("show_vtl", checked)
-    
+
     def search_vtl(self):
         if not self.vtl_search or not self.vtl_web:
             return
@@ -1584,7 +1589,7 @@ class VRYMainWindow(QMainWindow):
         verbose = self.settings.value("verbose_level", 0, type=int)
         if verbose > 0:
             self.console_output.append("Starting VRY...\n")
-        
+
         self.worker_thread = VRYWorkerThread(verbose)
         self.worker_thread.output_signal.connect(self.on_console_output)
         self.worker_thread.error_signal.connect(self.on_console_error)
@@ -1592,7 +1597,7 @@ class VRYMainWindow(QMainWindow):
         self.worker_thread.table_row_signal.connect(self.on_table_row_update)
         self.worker_thread.status_signal.connect(self.on_status_update)
         self.worker_thread.start()
-    
+
     def refresh_data(self):
         if self.worker_thread and self.worker_thread.running:
             was_frozen = self.freeze_btn.isChecked()
@@ -1629,9 +1634,8 @@ class VRYMainWindow(QMainWindow):
         if not self.toggle_vtl.isChecked():
             self.toggle_vtl.setChecked(True)
             self.toggle_vtl_tab(True)
-        if hasattr(self, 'vtl_web') and self.vtl_web:
+        if self.vtl_web:
             self.vtl_web.load(QUrl(f"https://vtl.lol/id/{puuid}"))
-            # Switch to VTL tab
             if hasattr(self, 'vtl_container'):
                 idx = self.tabs.indexOf(self.vtl_container)
                 if idx >= 0:
@@ -1759,7 +1763,7 @@ class VRYMainWindow(QMainWindow):
                 self.status_bar.showMessage("Settings saved. Restart may be required.", 5000)
             except Exception as e:
                 self.status_bar.showMessage(f"Failed to save settings: {e}", 5000)
-    
+
     def _on_console_scroll(self, value):
         sb = self.console_output.verticalScrollBar()
         self._console_auto_scroll = (value >= sb.maximum() - 4)
@@ -1787,24 +1791,42 @@ class VRYMainWindow(QMainWindow):
     def on_console_error(self, text):
         self.console_output.append(f"<span style='color:#ff6b6b'>ERROR: {text}</span>")
         self.status_bar.showMessage(f"Error: {text}", 5000)
-        self.status_bar.showMessage(f"Error: {text}", 5000)
-    
+
     def on_table_row_update(self, row_data, metadata):
+        """Stream a single row into the table during progressive population."""
         if not self.freeze_btn.isChecked():
             md = dict(metadata)
             md['incognito_privacy'] = self.incognito_action.isChecked()
             self.player_table.add_row_streaming(row_data, md)
-    
+
     def on_table_update(self, data, metadata):
-        self.player_table_data = data
+        """Handle a table update signal from the worker thread.
+
+        Two kinds of signals share this slot:
+        - Clear signal  (data == []):  clear the table and set column visibility.
+        - Save signal   (data != []):  save the full data set for later redraws
+          (e.g. incognito toggle) and update the status bar.  The table was
+          already populated row-by-row via table_row_signal, so we do NOT
+          re-render here to avoid wiping and redrawing all rows again.
+        """
         md = dict(metadata)
         md['incognito_privacy'] = self.incognito_action.isChecked()
-        self.player_table_metadata = md
-        
-        if not self.freeze_btn.isChecked():
-            self.player_table.update_table(data, md)
-            self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
-    
+
+        if not data:
+            # Clear / state-transition signal: wipe the table and apply column
+            # visibility for the new state.
+            self.player_table_data = []
+            self.player_table_metadata = md
+            if not self.freeze_btn.isChecked():
+                self.player_table.update_table([], md)
+        else:
+            # Full-data save signal: persist data for redraw-on-demand and
+            # update the status bar.  Rendering already happened via streaming.
+            self.player_table_data = data
+            self.player_table_metadata = md
+            if not self.freeze_btn.isChecked():
+                self.status_bar.showMessage(f"Updated: {len(data)} players", 3000)
+
     def _check_worker_watchdog(self):
         if self.worker_thread and self.worker_thread.running:
             if time.time() - self._last_status_time > 120:
@@ -1823,12 +1845,16 @@ class VRYMainWindow(QMainWindow):
                 extra = extra.replace("Defender", "🛡 Defender")
             text += f" • {extra}"
         self.status_label.setText(text)
-    
+
     def on_incognito_changed(self, checked):
+        """Re-render the current table data with the new privacy setting."""
         self.settings.setValue("incognito_privacy", checked)
         if self.player_table_data:
-            self.on_table_update(self.player_table_data, self.player_table_metadata)
-    
+            md = dict(self.player_table_metadata)
+            md['incognito_privacy'] = checked
+            self.player_table_metadata = md
+            self.player_table.update_table(self.player_table_data, md)
+
     def load_settings(self):
         geom = self.settings.value("geometry")
         if geom:
@@ -1837,18 +1863,18 @@ class VRYMainWindow(QMainWindow):
         theme = self.settings.value("theme", "Dark")
         if theme in THEMES:
             self.change_theme(theme)
-        
+
         self.toggle_matchloadouts.setChecked(self.settings.value("show_matchloadouts", True, type=bool))
         self.toggle_vtl.setChecked(self.settings.value("show_vtl", False, type=bool))
         self.toggle_console.setChecked(self.settings.value("show_console", False, type=bool))
-        
+
         if self.toggle_matchloadouts.isChecked():
             self.toggle_matchloadouts_tab(True)
         if self.toggle_vtl.isChecked():
             self.toggle_vtl_tab(True)
         if self.toggle_console.isChecked():
             self.toggle_console_tab(True)
-        
+
         self.incognito_action.setChecked(self.settings.value("incognito_privacy", True, type=bool))
 
         compact = self.settings.value("compact_mode", False, type=bool)
@@ -1863,19 +1889,20 @@ class VRYMainWindow(QMainWindow):
         self.settings.setValue("show_vtl", self.toggle_vtl.isChecked())
         self.settings.setValue("show_console", self.toggle_console.isChecked())
         self.settings.setValue("incognito_privacy", self.incognito_action.isChecked())
-    
+        self.settings.setValue("compact_mode", self.compact_action.isChecked())
+
     def closeEvent(self, event):
         self.save_settings()
-        
+
         if self.matchloadouts_web and hasattr(self.matchloadouts_web, 'cleanup'):
             self.matchloadouts_web.cleanup()
-        
+
         if self.worker_thread:
             self.worker_thread.stop()
             self.worker_thread.quit()
             if not self.worker_thread.wait(5000):
                 self.worker_thread.terminate()
-        
+
         event.accept()
 
 
@@ -1884,14 +1911,14 @@ def main():
         configure()
         if not inquirer.confirm(message="Run vRY now?", default=True).execute():
             sys.exit(0)
-    
+
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setApplicationName("VRY - UI v2.15")
-    
+
     window = VRYMainWindow()
     window.show()
-    
+
     sys.exit(app.exec())
 
 

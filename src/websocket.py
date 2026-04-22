@@ -26,7 +26,7 @@ class Ws:
         self.chat_limit = cfg.chat_limit
         self.server = server
         self.rpc = rpc if self.cfg.get_feature_flag("discord_rpc") else None
-        
+
         # Cancellation support
         self._shutdown = False
         self._current_websocket = None
@@ -52,34 +52,32 @@ class Ws:
             ).decode()
         }
         url = f"wss://127.0.0.1:{self.lockfile['port']}"
-        
+
         try:
             async with websockets.connect(
-                url, 
-                ssl=self.ssl_context, 
+                url,
+                ssl=self.ssl_context,
                 extra_headers=local_headers,
                 ping_interval=20,
                 ping_timeout=10,
                 close_timeout=5
             ) as websocket:
                 self._current_websocket = websocket
-                
+
                 await websocket.send('[5, "OnJsonApiEvent_chat_v4_presences"]')
                 if self.cfg.get_feature_flag("game_chat"):
                     await websocket.send('[5, "OnJsonApiEvent_chat_v6_messages"]')
-                
+
                 while not self._shutdown:
                     try:
-                        # Use wait_for with timeout to allow periodic shutdown checks
                         response = await asyncio.wait_for(
-                            websocket.recv(), 
+                            websocket.recv(),
                             timeout=2.0
                         )
                         result = self.handle(response, initial_game_state)
                         if result is not None:
                             return result
                     except asyncio.TimeoutError:
-                        # Normal timeout, check shutdown flag and continue
                         continue
                     except websockets.exceptions.ConnectionClosed:
                         if self._shutdown:
@@ -87,9 +85,9 @@ class Ws:
                         raise
                     except asyncio.CancelledError:
                         return initial_game_state
-                        
+
                 return initial_game_state
-                
+
         except asyncio.CancelledError:
             return initial_game_state
         except Exception as e:
@@ -102,63 +100,75 @@ class Ws:
     def handle(self, m, initial_game_state):
         if len(m) <= 10:
             return None
-            
+
         try:
             resp_json = json.loads(m)
         except json.JSONDecodeError:
             return None
-            
+
         uri = resp_json[2].get("uri") if len(resp_json) > 2 else None
-        
+
         if uri == "/chat/v4/presences":
             return self._handle_presence(resp_json, initial_game_state)
         elif uri == "/chat/v6/messages":
             self._handle_message(resp_json)
-            
+
         return None
+
+    def _get_session_state(self, private_data):
+        """Extract sessionLoopState from either nested or flat presence format."""
+        match_data = private_data.get("matchPresenceData")
+        if match_data and "sessionLoopState" in match_data:
+            return match_data["sessionLoopState"]
+        return private_data.get("sessionLoopState")
 
     def _handle_presence(self, resp_json, initial_game_state):
         try:
             presence = resp_json[2]["data"]["presences"][0]
             if presence['puuid'] != self.Requests.puuid:
                 return None
-                
+
             # Skip if League of Legends
             if presence.get("championId") is not None or presence.get("product") == "league_of_legends":
                 return None
-                
+
             private_data = json.loads(base64.b64decode(presence['private']))
-            state = private_data["matchPresenceData"]["sessionLoopState"]
-            
+
+            # Handle both nested (matchPresenceData.sessionLoopState) and
+            # flat (sessionLoopState) presence API formats.
+            state = self._get_session_state(private_data)
+            if state is None:
+                return None
+
             if self.rpc:
                 self.rpc.set_rpc(private_data)
-                
+
             if state != initial_game_state:
                 self.messages = 0
                 self.message_history = []
                 return state
-                
+
         except (KeyError, IndexError, json.JSONDecodeError):
             pass
-            
+
         return None
 
     def _handle_message(self, resp_json):
         try:
             message = resp_json[2]["data"]["messages"][0]
-            
+
             if "ares-coregame" not in message["cid"]:
                 return
             if message["id"] in self.id_seen:
                 return
-                
+
             # Find ally team
             ally_team = None
             for player in self.player_data:
                 if player == self.Requests.puuid:
                     ally_team = self.player_data[player]["team"]
                     break
-            
+
             # Determine color
             if message["puuid"] == self.Requests.puuid:
                 clr = (221, 224, 41)
@@ -166,20 +176,20 @@ class Ws:
                 clr = (76, 151, 237)
             else:
                 clr = (238, 77, 77)
-            
+
             chat_indicator = message["cid"].split("@")[0].rsplit("-", 1)[1]
             chat_prefix = color("[Team]", fore=(116, 162, 214)) if chat_indicator == "blue" else "[All]"
-            
+
             puuid = message["puuid"]
             agent = ""
             streamer_mode = False
-            
+
             if puuid in self.player_data:
                 agent = self.colors.get_agent_from_uuid(self.player_data[puuid]['agent'].lower())
                 streamer_mode = self.player_data[puuid].get('streamer_mode', False)
-            
+
             name = f"{message['game_name']}#{message['game_tag']}"
-            
+
             if streamer_mode and self.hide_names and puuid not in self.player_data.get("ignore", []):
                 self.print_message(f"{chat_prefix} {color(self.colors.escape_ansi(agent), clr)}: {message['body']}")
                 self.server.send_payload("chat", {
@@ -202,9 +212,9 @@ class Ws:
                     "agent": self.colors.escape_ansi(agent),
                     "text": message['body']
                 })
-            
+
             self.id_seen.append(message['id'])
-            
+
         except (KeyError, IndexError):
             pass
 

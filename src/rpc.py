@@ -31,105 +31,134 @@ class Rpc():
         self.log("New data set in RPC")
         self.set_rpc(self.last_presence_data)
 
+    def _get_session_state(self, presence):
+        """Extract sessionLoopState from either nested or flat presence format."""
+        match_data = presence.get("matchPresenceData") or {}
+        state = match_data.get("sessionLoopState") or presence.get("sessionLoopState")
+        return state
+
+    def _get_match_map(self, presence):
+        """Extract matchMap from either nested or flat presence format."""
+        match_data = presence.get("matchPresenceData") or {}
+        return match_data.get("matchMap") or presence.get("matchMap", "")
 
     def set_rpc(self, presence):
+        if not presence:
+            self.last_presence_data = presence
+            return
+
         if self.discord_running:
             try:
-                if presence["isValid"]:
-                    match_data = presence["matchPresenceData"]
-                    party_data = presence["partyPresenceData"]
-                    
-                    if match_data["sessionLoopState"] == "INGAME":
-                        if self.data.get("agent") is None or self.data.get("agent") == "":
-                            agent_img = None
-                            agent = None
-                        else:
-                            agent = self.colors.agent_dict.get(self.data.get("agent").lower())
-                            agent_img = agent.lower().replace("/", "")
+                if not presence.get("isValid"):
+                    self.last_presence_data = presence
+                    return
 
-                        if presence["provisioningFlow"] == "CustomGame":
-                            gamemode = "Custom Game"
-                        else:
-                            gamemode = self.gamemodes.get(presence['queueId'])
-                        
-                        details = f"{gamemode} // {presence['partyOwnerMatchScoreAllyTeam']} - {presence['partyOwnerMatchScoreEnemyTeam']}"
+                # Support both nested (matchPresenceData / partyPresenceData) and
+                # flat presence formats produced by different Riot client versions.
+                party_data = presence.get("partyPresenceData") or {}
+                session_state = self._get_session_state(presence)
 
-                        mapText = self.map_dict.get(match_data["matchMap"].lower())
-                        if mapText == "The Range":
-                            mapImage = "splash_range_square"
-                            details = "in Range"
-                            agent_img = str(self.data.get("rank"))
-                            agent = self.data.get("rank_name")
-                        else:
-                            mapImage = f"splash_{self.map_dict.get(match_data['matchMap'].lower())}_square".lower()
-                        if mapText is None or mapText == "":
-                            mapText = None
-                            mapImage = None
+                if not session_state:
+                    self.last_presence_data = presence
+                    return
 
-                        if self.last_presence_data.get("matchPresenceData", {}).get("sessionLoopState") != match_data["sessionLoopState"]:
-                            self.start_time = time.time()
+                if session_state == "INGAME":
+                    if not self.data.get("agent"):
+                        agent_img = None
+                        agent = None
+                    else:
+                        agent = self.colors.agent_dict.get(self.data.get("agent").lower())
+                        agent_img = agent.lower().replace("/", "") if agent else None
 
-                        self.rpc.update(
-                            state=f"In a Party ({party_data['partySize']} of {party_data['maxPartySize']})",
-                            details=details,
-                            large_image=mapImage,
-                            large_text=mapText,
-                            small_image=agent_img,
-                            small_text=agent,
-                            start=self.start_time,
-                            buttons=[{"label": "What's this? 👀", "url": "https://vry-ui.vercel.app/"}]
-                        )
-                        self.log("RPC in-game data update")
-                    elif match_data["sessionLoopState"] == "MENUS":
-                        if presence["isIdle"]:
-                            image = "game_icon_yellow"
-                            image_text = "VALORANT - Idle"
-                        else:
-                            image = "game_icon"
-                            image_text = "VALORANT - Online"
+                    if presence.get("provisioningFlow") == "CustomGame":
+                        gamemode = "Custom Game"
+                    else:
+                        gamemode = self.gamemodes.get(presence.get('queueId', ''), "Unknown")
 
-                        if party_data["partyAccessibility"] == "OPEN":
-                            party_string = "Open Party"
-                        else:
-                            party_string = "Closed Party"
+                    score_ally = presence.get('partyOwnerMatchScoreAllyTeam', 0)
+                    score_enemy = presence.get('partyOwnerMatchScoreEnemyTeam', 0)
+                    details = f"{gamemode} // {score_ally} - {score_enemy}"
 
-                        if party_data["partyState"] == "CUSTOM_GAME_SETUP":
-                            gamemode = "Custom Game"
-                        else:
-                            gamemode = self.gamemodes.get(presence['queueId'])
+                    match_map_url = self._get_match_map(presence)
+                    mapText = self.map_dict.get(match_map_url.lower()) if match_map_url else None
 
-                        self.rpc.update(
-                            state=f"{party_string} ({party_data['partySize']} of {party_data['maxPartySize']})",
-                            details=f" Lobby - {gamemode}",
-                            large_image=image,
-                            large_text=image_text,
-                            small_image=str(self.data.get("rank")),
-                            small_text=self.data.get("rank_name"),
-                            buttons=[{"label": "What's this? 👀", "url": "https://vry-ui.vercel.app/"}]
-                        )
-                        self.log("RPC menu data update")
-                    elif match_data["sessionLoopState"] == "PREGAME":
-                        if presence["provisioningFlow"] == "CustomGame" or party_data["partyState"] == "CUSTOM_GAME_SETUP":
-                            gamemode = "Custom Game"
-                        else:
-                            gamemode = self.gamemodes.get(presence['queueId'])
+                    if mapText == "The Range":
+                        mapImage = "splash_range_square"
+                        details = "in Range"
+                        agent_img = str(self.data.get("rank"))
+                        agent = self.data.get("rank_name")
+                    elif mapText:
+                        mapImage = f"splash_{mapText}_square".lower()
+                    else:
+                        mapText = None
+                        mapImage = None
 
-                        mapText = self.map_dict.get(match_data["matchMap"].lower())
-                        mapImage = f"splash_{self.map_dict.get(match_data['matchMap'].lower())}_square".lower()
-                        if mapText is None or mapText == "":
-                            mapText = None
-                            mapImage = None
+                    if self.last_presence_data and self._get_session_state(self.last_presence_data) != session_state:
+                        self.start_time = time.time()
 
-                        self.rpc.update(
-                            state=f"In a Party ({party_data['partySize']} of {party_data['maxPartySize']})",
-                            details=f"Agent Select - {gamemode}",
-                            large_image=mapImage,
-                            large_text=mapText,
-                            small_image=str(self.data.get("rank")),
-                            small_text=self.data.get("rank_name"),
-                            buttons=[{"label": "What's this? 👀", "url": "https://vry-ui.vercel.app/"}]
-                        )
-                        self.log("RPC agent-select data update")
+                    self.rpc.update(
+                        state=f"In a Party ({party_data.get('partySize', 1)} of {party_data.get('maxPartySize', 5)})",
+                        details=details,
+                        large_image=mapImage,
+                        large_text=mapText,
+                        small_image=agent_img,
+                        small_text=agent,
+                        start=self.start_time,
+                        buttons=[{"label": "What's this? 👀", "url": "https://vry-ui.vercel.app/"}]
+                    )
+                    self.log("RPC in-game data update")
+
+                elif session_state == "MENUS":
+                    if presence.get("isIdle"):
+                        image = "game_icon_yellow"
+                        image_text = "VALORANT - Idle"
+                    else:
+                        image = "game_icon"
+                        image_text = "VALORANT - Online"
+
+                    if party_data.get("partyAccessibility") == "OPEN":
+                        party_string = "Open Party"
+                    else:
+                        party_string = "Closed Party"
+
+                    if party_data.get("partyState") == "CUSTOM_GAME_SETUP":
+                        gamemode = "Custom Game"
+                    else:
+                        gamemode = self.gamemodes.get(presence.get('queueId', ''), "Unknown")
+
+                    self.rpc.update(
+                        state=f"{party_string} ({party_data.get('partySize', 1)} of {party_data.get('maxPartySize', 5)})",
+                        details=f" Lobby - {gamemode}",
+                        large_image=image,
+                        large_text=image_text,
+                        small_image=str(self.data.get("rank")),
+                        small_text=self.data.get("rank_name"),
+                        buttons=[{"label": "What's this? 👀", "url": "https://vry-ui.vercel.app/"}]
+                    )
+                    self.log("RPC menu data update")
+
+                elif session_state == "PREGAME":
+                    if presence.get("provisioningFlow") == "CustomGame" or \
+                            party_data.get("partyState") == "CUSTOM_GAME_SETUP":
+                        gamemode = "Custom Game"
+                    else:
+                        gamemode = self.gamemodes.get(presence.get('queueId', ''), "Unknown")
+
+                    match_map_url = self._get_match_map(presence)
+                    mapText = self.map_dict.get(match_map_url.lower()) if match_map_url else None
+                    mapImage = f"splash_{mapText}_square".lower() if mapText else None
+
+                    self.rpc.update(
+                        state=f"In a Party ({party_data.get('partySize', 1)} of {party_data.get('maxPartySize', 5)})",
+                        details=f"Agent Select - {gamemode}",
+                        large_image=mapImage,
+                        large_text=mapText,
+                        small_image=str(self.data.get("rank")),
+                        small_text=self.data.get("rank_name"),
+                        buttons=[{"label": "What's this? 👀", "url": "https://vry-ui.vercel.app/"}]
+                    )
+                    self.log("RPC agent-select data update")
+
             except InvalidID:
                 self.discord_running = False
         else:
@@ -141,6 +170,7 @@ class Rpc():
                 self.set_rpc(presence)
             except DiscordNotFound:
                 self.discord_running = False
+
         self.last_presence_data = presence
 
     def close(self):
